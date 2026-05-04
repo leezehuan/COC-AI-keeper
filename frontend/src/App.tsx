@@ -2,6 +2,8 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from './api';
 import type { ActionResponse, Character, ChatMessage, GameSession, InventoryItem } from './types';
 
+const assetBase = `${import.meta.env.BASE_URL.replace(/\/$/, '')}/assets`;
+
 const openingText = '现在是 1926 年四月十二日，晚上八点十五分左右。航标岛上的灯塔在暴风雨前熄灭，埃塞克斯号触礁沉没。你坐在救生艇里，黑暗的海面拍打船舷，远处只有灯塔底部透出微弱的光。';
 
 export default function App() {
@@ -386,11 +388,11 @@ export default function App() {
           <section className="card">
             <h2>材料与地图</h2>
             <div className="asset-links">
-              <a href="/assets/附件/航标岛地图.png" target="_blank">航标岛地图</a>
-              <a href="/assets/附件/航标岛灯塔地图.png" target="_blank">灯塔地图</a>
-              <a href="/assets/附件/材料1.png" target="_blank">材料 1</a>
-              <a href="/assets/附件/材料2.png" target="_blank">材料 2</a>
-              <a href="/assets/附件/材料3.png" target="_blank">材料 3</a>
+              <a href={`${assetBase}/附件/航标岛地图.png`} target="_blank">航标岛地图</a>
+              <a href={`${assetBase}/附件/航标岛灯塔地图.png`} target="_blank">灯塔地图</a>
+              <a href={`${assetBase}/附件/材料1.png`} target="_blank">材料 1</a>
+              <a href={`${assetBase}/附件/材料2.png`} target="_blank">材料 2</a>
+              <a href={`${assetBase}/附件/材料3.png`} target="_blank">材料 3</a>
             </div>
           </section>
 

@@ -1,5 +1,7 @@
 import type { ActionResponse, ActionStreamEvent, Character, GameSession } from './types';
 
+const apiBase = `${import.meta.env.BASE_URL.replace(/\/$/, '')}/api`;
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     headers: { 'Content-Type': 'application/json', ...(options?.headers ?? {}) },
@@ -24,28 +26,28 @@ function parseErrorMessage(detail: string, status: number): string {
 }
 
 export const api = {
-  init: () => request<{ status: string }>('/api/init', { method: 'POST' }),
+  init: () => request<{ status: string }>(`${apiBase}/init`, { method: 'POST' }),
   importContent: (resetChroma = false) =>
-    request<{ scenario_id: string; scenario_chunks: number; rule_chunks: number; scenario_entities: number; clue_index: number; characters: number }>('/api/import', {
+    request<{ scenario_id: string; scenario_chunks: number; rule_chunks: number; scenario_entities: number; clue_index: number; characters: number }>(`${apiBase}/import`, {
       method: 'POST',
       body: JSON.stringify({ reset_chroma: resetChroma, import_characters: true })
     }),
-  characters: () => request<Character[]>('/api/characters'),
-  sessions: () => request<GameSession[]>('/api/sessions'),
-  getSession: (sessionId: string) => request<GameSession>(`/api/sessions/${sessionId}`),
-  deleteSession: (sessionId: string) => request<{ status: string; deleted_memory_chunks: number }>(`/api/sessions/${sessionId}`, { method: 'DELETE' }),
+  characters: () => request<Character[]>(`${apiBase}/characters`),
+  sessions: () => request<GameSession[]>(`${apiBase}/sessions`),
+  getSession: (sessionId: string) => request<GameSession>(`${apiBase}/sessions/${sessionId}`),
+  deleteSession: (sessionId: string) => request<{ status: string; deleted_memory_chunks: number }>(`${apiBase}/sessions/${sessionId}`, { method: 'DELETE' }),
   createSession: (characterId?: string) =>
-    request<GameSession>('/api/sessions', {
+    request<GameSession>(`${apiBase}/sessions`, {
       method: 'POST',
       body: JSON.stringify({ character_id: characterId ?? null, title: '无光的灯塔' })
     }),
   sendAction: (sessionId: string, message: string) =>
-    request<ActionResponse>(`/api/sessions/${sessionId}/actions`, {
+    request<ActionResponse>(`${apiBase}/sessions/${sessionId}/actions`, {
       method: 'POST',
       body: JSON.stringify({ message })
     }),
   streamAction: (sessionId: string, message: string, onEvent: (event: ActionStreamEvent) => void) =>
-    streamRequest(`/api/sessions/${sessionId}/actions/stream`, {
+    streamRequest(`${apiBase}/sessions/${sessionId}/actions/stream`, {
       method: 'POST',
       body: JSON.stringify({ message })
     }, onEvent)

@@ -67,7 +67,7 @@ def create_session(payload: schemas.SessionCreate, db: Session = Depends(get_db)
     if character is None:
         character = db.query(models.Character).filter(models.Character.scenario_id == scenario.id).first()
     if character is None:
-        raise HTTPException(status_code=400, detail="没有可用角色。请先调用 /api/import 导入资料。")
+        raise HTTPException(status_code=400, detail="没有可用角色。请先调用 /coc/api/import 导入资料。")
     session = models.GameSession(scenario_id=scenario.id, character_id=character.id, title=payload.title)
     session.state = ensure_story_state({}, session.current_location, session.current_scene, session.current_time)
     db.add(session)

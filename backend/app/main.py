@@ -38,6 +38,6 @@ app.add_middleware(
 
 assets_dir = resolve_project_path(settings.assets_dir)
 if assets_dir.exists():
-    app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+    app.mount("/coc/assets", StaticFiles(directory=str(assets_dir)), name="assets")
 
-app.include_router(router)
+app.include_router(router, prefix="/coc")
