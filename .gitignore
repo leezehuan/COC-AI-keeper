@@ -20,8 +20,7 @@ htmlcov/
 # Node / 前端构建产物
 node_modules/
 frontend/node_modules/
-dist/
-frontend/dist/
+/dist/
 .vite/
 frontend/.vite/
 npm-debug.log*

@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from './api';
-import type { Character, ChatMessage, GameSession, InventoryItem } from './types';
+import type { ActionResponse, Character, ChatMessage, GameSession, InventoryItem } from './types';
 
 const openingText = '现在是 1926 年四月十二日，晚上八点十五分左右。航标岛上的灯塔在暴风雨前熄灭，埃塞克斯号触礁沉没。你坐在救生艇里，黑暗的海面拍打船舷，远处只有灯塔底部透出微弱的光。';
 
@@ -167,19 +167,17 @@ export default function App() {
     setBusy(true);
     setError('');
     setInput('');
-    setMessages((prev) => [...prev, { role: 'player', content }]);
+    setMessages((prev) => [...prev, { role: 'player', content }, { role: 'keeper', content: '' }]);
     try {
-      const response = await api.sendAction(session.id, content);
-      setSession(response.session);
-      setOptions(normalizeOptions(response.options));
-      const metaParts: string[] = [];
-      response.skill_checks.forEach((check) => metaParts.push(`${check.skill} ${check.roll}/${check.skill_value}，${check.success_level}`));
-      response.sanity_checks.forEach((check) => metaParts.push(`理智损失 ${check.san_loss}，当前 ${check.san_after}`));
-      if (response.discovered_clues.length) metaParts.push(`发现线索 ${response.discovered_clues.length} 条`);
-      if (typeof response.state_delta.time_cost_minutes === 'number') metaParts.push(`耗时 ${response.state_delta.time_cost_minutes} 分钟`);
-      if (typeof response.state_delta.danger_delta === 'number' && response.state_delta.danger_delta > 0) metaParts.push(`危险 +${response.state_delta.danger_delta}`);
-      metaParts.push(...formatInventoryChangeSummary(response.state_delta));
-      setMessages((prev) => [...prev, { role: 'keeper', content: response.narration, meta: metaParts.join(' · ') }]);
+      await api.streamAction(session.id, content, (event) => {
+        if (event.type === 'chunk') {
+          appendToLastKeeperMessage(event.content);
+        } else if (event.type === 'final') {
+          applyActionResponse(event.response);
+        } else if (event.type === 'error') {
+          throw new Error(event.detail);
+        }
+      });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       setError(detail);
@@ -187,6 +185,31 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function appendToLastKeeperMessage(chunk: string) {
+    setMessages((prev) => {
+      const next = [...prev];
+      const index = next.length - 1;
+      if (index >= 0 && next[index].role === 'keeper') {
+        next[index] = { ...next[index], content: `${next[index].content}${chunk}` };
+      }
+      return next;
+    });
+  }
+
+  function applyActionResponse(response: ActionResponse) {
+    setSession(response.session);
+    setOptions(normalizeOptions(response.options));
+    const meta = buildActionMeta(response);
+    setMessages((prev) => {
+      const next = [...prev];
+      const index = next.length - 1;
+      if (index >= 0 && next[index].role === 'keeper') {
+        next[index] = { ...next[index], content: response.narration, meta };
+      }
+      return next;
+    });
   }
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -454,6 +477,17 @@ function buildInventoryMeta(metadata: Record<string, unknown>): string {
 function selectedCharacterLabel(characters: Character[], selectedCharacter: string): string {
   const character = characters.find((item) => item.id === selectedCharacter);
   return character ? `角色：${character.archetype}` : '选择角色';
+}
+
+function buildActionMeta(response: ActionResponse): string {
+  const metaParts: string[] = [];
+  response.skill_checks.forEach((check) => metaParts.push(`${check.skill} ${check.roll}/${check.skill_value}，${check.success_level}`));
+  response.sanity_checks.forEach((check) => metaParts.push(`理智损失 ${check.san_loss}，当前 ${check.san_after}`));
+  if (response.discovered_clues.length) metaParts.push(`发现线索 ${response.discovered_clues.length} 条`);
+  if (typeof response.state_delta.time_cost_minutes === 'number') metaParts.push(`耗时 ${response.state_delta.time_cost_minutes} 分钟`);
+  if (typeof response.state_delta.danger_delta === 'number' && response.state_delta.danger_delta > 0) metaParts.push(`危险 +${response.state_delta.danger_delta}`);
+  metaParts.push(...formatInventoryChangeSummary(response.state_delta));
+  return metaParts.join(' · ');
 }
 
 function formatInventoryChangeSummary(delta: Record<string, unknown>): string[] {

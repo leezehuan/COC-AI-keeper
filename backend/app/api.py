@@ -1,4 +1,9 @@
+import json
+import time
+from collections.abc import Iterator
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, selectinload
 
 from app import models, schemas
@@ -117,6 +122,30 @@ def submit_action(session_id: str, payload: schemas.PlayerActionIn, db: Session 
     if db.get(models.GameSession, session_id) is None:
         raise HTTPException(status_code=404, detail="未找到指定会话")
     result = get_agent().run_turn(db, session_id, payload.message)
+    return build_action_response(db, session_id, result)
+
+
+@router.post("/sessions/{session_id}/actions/stream")
+def submit_action_stream(session_id: str, payload: schemas.PlayerActionIn, db: Session = Depends(get_db)) -> StreamingResponse:
+    if db.get(models.GameSession, session_id) is None:
+        raise HTTPException(status_code=404, detail="未找到指定会话")
+
+    def event_stream() -> Iterator[str]:
+        try:
+            yield encode_stream_event({"type": "start"})
+            result = get_agent().run_turn(db, session_id, payload.message)
+            response = build_action_response(db, session_id, result)
+            for chunk in split_stream_text(response.narration):
+                yield encode_stream_event({"type": "chunk", "content": chunk})
+                time.sleep(0.015)
+            yield encode_stream_event({"type": "final", "response": response.model_dump(mode="json")})
+        except Exception as exc:
+            yield encode_stream_event({"type": "error", "detail": str(exc)})
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
+def build_action_response(db: Session, session_id: str, result: dict) -> schemas.ActionResponse:
     session_out = build_session_out(db, session_id)
     return schemas.ActionResponse(
         session=session_out,
@@ -129,6 +158,21 @@ def submit_action(session_id: str, payload: schemas.PlayerActionIn, db: Session 
         state_delta=result.get("state_delta", {}),
         needs_clarification=bool(result.get("needs_clarification")),
     )
+
+
+def encode_stream_event(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+
+def split_stream_text(text: str) -> Iterator[str]:
+    buffer = ""
+    for char in text:
+        buffer += char
+        if len(buffer) >= 12 or char in "。！？；\n":
+            yield buffer
+            buffer = ""
+    if buffer:
+        yield buffer
 
 
 def build_session_out(db: Session, session_id: str) -> schemas.SessionOut:

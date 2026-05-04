@@ -103,6 +103,12 @@ export interface ActionResponse {
   needs_clarification: boolean;
 }
 
+export type ActionStreamEvent =
+  | { type: 'start' }
+  | { type: 'chunk'; content: string }
+  | { type: 'final'; response: ActionResponse }
+  | { type: 'error'; detail: string };
+
 export interface ChatMessage {
   role: 'keeper' | 'player' | 'system';
   content: string;

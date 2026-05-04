@@ -75,15 +75,19 @@ def build_turn_delta(
     action_type = str(intent.get("action_type") or "调查")
     time_cost = int(adjudication.get("time_cost_minutes") or 0)
     danger_delta = infer_danger_delta(action_type, skill_checks, sanity_checks, adjudication)
+    target_location = extract_location_delta(generated_delta)
+    target_scene = extract_scene_delta(generated_delta)
+    if target_location and not target_scene and location_dedupe_key(target_location) != location_dedupe_key(current_location):
+        target_scene = target_location
     delta: dict[str, Any] = {
-        "location": generated_delta.get("location") if isinstance(generated_delta.get("location"), str) else None,
-        "scene": generated_delta.get("scene") if isinstance(generated_delta.get("scene"), str) else None,
+        "location": target_location,
+        "scene": target_scene,
         "time_cost_minutes": time_cost,
         "danger_delta": danger_delta,
         "investigated_target": target,
         "action_type": action_type,
         "story_updates": {
-            "visited_location": current_location,
+            "visited_location": target_location or current_location,
             "available_locations": infer_available_locations(player_input, generated_delta, location_context),
             "triggered_events": infer_triggered_events(player_input, generated_clues),
             "flags": build_flags(player_input, intent, skill_checks, sanity_checks),
@@ -109,14 +113,66 @@ def build_turn_delta(
     return delta
 
 
+def extract_location_delta(generated_delta: dict[str, Any]) -> str:
+    candidates = [
+        generated_delta.get("location"),
+        generated_delta.get("current_location"),
+        generated_delta.get("当前位置"),
+        generated_delta.get("当前地点"),
+        generated_delta.get("地点"),
+    ]
+    for key in ["scene_updates", "story_updates", "location_updates"]:
+        nested = generated_delta.get(key)
+        if isinstance(nested, dict):
+            candidates.extend([
+                nested.get("location"),
+                nested.get("current_location"),
+                nested.get("当前位置"),
+                nested.get("当前地点"),
+                nested.get("地点"),
+                nested.get("visited_location"),
+            ])
+    for candidate in candidates:
+        normalized = normalize_location_name(candidate)
+        if normalized:
+            return normalized
+    return ""
+
+
+def extract_scene_delta(generated_delta: dict[str, Any]) -> str:
+    candidates = [
+        generated_delta.get("scene"),
+        generated_delta.get("current_scene"),
+        generated_delta.get("当前场景"),
+        generated_delta.get("场景"),
+    ]
+    for key in ["scene_updates", "story_updates"]:
+        nested = generated_delta.get(key)
+        if isinstance(nested, dict):
+            candidates.extend([
+                nested.get("scene"),
+                nested.get("current_scene"),
+                nested.get("当前场景"),
+                nested.get("场景"),
+            ])
+    for candidate in candidates:
+        normalized = normalize_scene_name(candidate)
+        if normalized:
+            return normalized
+    return ""
+
+
 def apply_turn_delta(story_state: dict[str, Any], delta: dict[str, Any], current_location: str, current_scene: str, current_time: str) -> dict[str, Any]:
     state = ensure_story_state(story_state, current_location, current_scene, current_time)
     story = state["剧情"]
     scene = state["场景"]
     memory = state["记忆"]
     target_location = normalize_location_name(delta.get("location") or current_location) or current_location
-    target_scene = str(delta.get("scene") or current_scene)
+    previous_location = normalize_location_name(current_location) or current_location
+    location_changed = location_dedupe_key(target_location) != location_dedupe_key(previous_location)
+    target_scene = normalize_scene_name(delta.get("scene")) or (target_location if location_changed else normalize_scene_name(current_scene) or current_scene)
     add_unique(story["已访问地点"], target_location)
+    sync_available_locations(story["当前可前往地点"], target_location)
     for location in delta.get("story_updates", {}).get("available_locations", []):
         sync_available_locations(story["当前可前往地点"], location)
     for event in delta.get("story_updates", {}).get("triggered_events", []):
@@ -191,10 +247,30 @@ def unique_locations(locations: list[str]) -> list[str]:
 def normalize_location_name(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, (dict, list, tuple, set)):
+        return ""
     text = str(value).strip(" \t\r\n，。；;:：")
     if not text or text.lower() in {"none", "null", "undefined", "nan"}:
         return ""
     for prefix in ["起点", "当前位置", "当前地点", "地点", "可前往地点"]:
+        marker = f"{prefix}："
+        if text.startswith(marker):
+            text = text.removeprefix(marker).strip(" \t\r\n，。；;:：")
+        marker = f"{prefix}:"
+        if text.startswith(marker):
+            text = text.removeprefix(marker).strip(" \t\r\n，。；;:：")
+    return text
+
+
+def normalize_scene_name(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list, tuple, set)):
+        return ""
+    text = str(value).strip(" \t\r\n，。；;:：")
+    if not text or text.lower() in {"none", "null", "undefined", "nan"}:
+        return ""
+    for prefix in ["当前场景", "场景"]:
         marker = f"{prefix}："
         if text.startswith(marker):
             text = text.removeprefix(marker).strip(" \t\r\n，。；;:：")

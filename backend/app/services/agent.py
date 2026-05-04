@@ -16,6 +16,7 @@ from app.services.guardrails import (
 )
 from app.services.inventory import apply_inventory_changes
 from app.services.llm import LLMClient
+from app.services.prompt_config import build_intent_prompt, build_keeper_response_prompt
 from app.services.retrieval import RetrievalService
 from app.services.rules import adjudicate_action, as_adjudication_dict, execute_rule_tools
 from app.services.story_state import apply_turn_delta, build_turn_delta, ensure_story_state
@@ -118,13 +119,7 @@ class KeeperAgent:
         session = state["session"]
         message = state["player_input"]
         fallback = heuristic_intent(message)
-        prompt = [
-            {"role": "system", "content": "你是克苏鲁调查游戏的玩家意图解析节点。只输出 JSON。"},
-            {
-                "role": "user",
-                "content": f"当前地点：{session.current_location}\n当前场景：{session.current_scene}\n玩家输入：{message}\n输出字段：action_type,target,skill,needs_clarification,clarification_question,is_meta,reason。",
-            },
-        ]
+        prompt = build_intent_prompt(session.current_location, session.current_scene, message)
         parsed = self.llm.chat_json(prompt, fallback=fallback)
         parsed = {**fallback, **{k: v for k, v in parsed.items() if v is not None}}
         state["intent"] = parsed
@@ -219,41 +214,27 @@ class KeeperAgent:
         memory_text = format_context(state.get("memory_context", []))
         rule_text = format_context(state.get("rule_context", []))
         inventory_text = format_inventory(state["session"].inventory_items)
-        prompt = [
-            {
-                "role": "system",
-                "content": "你是《克苏鲁的呼唤》AI 守秘人。遵守剧本事实，不泄露主持人秘密。只输出 JSON。",
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"当前地点：{state['session'].current_location}\n"
-                    f"角色：{state['character'].archetype}，HP {state['character'].hp_current}/{state['character'].hp_max}，SAN {state['character'].san_current}\n"
-                    f"玩家行动：{state['player_input']}\n"
-                    f"意图：{state['intent']}\n"
-                    f"裁定：{state['adjudication']}\n"
-                    f"行动解析：{state.get('resolution', {})}\n"
-                    f"技能检定：{state.get('skill_checks', [])}\n"
-                    f"理智检定：{state.get('sanity_checks', [])}\n"
-                    f"当前物品：{inventory_text}\n"
-                    f"当前可见地点实体：{location_text}\n"
-                    f"剧本片段：\n{scenario_text}\n"
-                    f"结构化实体：\n{entity_text}\n"
-                    f"线索索引：\n{clue_text}\n"
-                    f"会话记忆：\n{memory_text}\n"
-                    f"规则片段：\n{rule_text}\n"
-                    "输出 JSON 字段：narration, options, state_delta, discovered_clues。"
-                    "options 必须是中文字符串数组，例如 [\"检查门缝\", \"询问同伴\"]，不要输出对象数组。"
-                    "discovered_clues 每项包含 clue_key,name,content,source_location。"
-                    "如本回合发现新出口、新路径或新的玩家可前往地点，必须写入 state_delta.story_updates.available_locations，值为地点名称字符串数组。"
-                    "如玩家获得、消耗、丢弃或使用物品，只能在 state_delta.inventory_changes 中提出变更；"
-                    "每项包含 operation,name,item_key,quantity,description,consumable,reason。"
-                    "operation 只能是 获得物品、消耗物品、丢弃物品、使用物品；使用物品默认不消耗，除非 consumable 为 true。"
-                    "narration 使用第二人称，阴郁克制，不要解释幕后真相。"
-                    "如果行动偏离剧情，应以世界内后果引导，不要替玩家做选择。"
-                ),
-            },
-        ]
+        prompt = build_keeper_response_prompt(
+            current_location=state["session"].current_location,
+            current_scene=state["session"].current_scene,
+            character_archetype=state["character"].archetype,
+            hp_current=state["character"].hp_current,
+            hp_max=state["character"].hp_max,
+            san_current=state["character"].san_current,
+            player_input=state["player_input"],
+            intent=state["intent"],
+            adjudication=state["adjudication"],
+            resolution=state.get("resolution", {}),
+            skill_checks=state.get("skill_checks", []),
+            sanity_checks=state.get("sanity_checks", []),
+            inventory_text=inventory_text,
+            location_text=location_text,
+            scenario_text=scenario_text,
+            entity_text=entity_text,
+            clue_text=clue_text,
+            memory_text=memory_text,
+            rule_text=rule_text,
+        )
         generated = self.llm.chat_json(prompt, fallback=fallback)
         state["generated_payload"] = generated
         state["narration"] = str(generated.get("narration") or fallback["narration"])
@@ -320,10 +301,6 @@ class KeeperAgent:
             character.san_current = int(san["san_after"])
 
         delta = state.get("state_delta", {})
-        if isinstance(delta.get("location"), str) and delta["location"]:
-            session.current_location = delta["location"][:200]
-        if isinstance(delta.get("scene"), str) and delta["scene"]:
-            session.current_scene = delta["scene"][:200]
         session.state = apply_turn_delta(
             state.get("story_state", {}),
             delta,
@@ -331,6 +308,11 @@ class KeeperAgent:
             session.current_scene,
             session.current_time,
         )
+        scene_state = session.state.get("场景", {}) if isinstance(session.state.get("场景"), dict) else {}
+        if isinstance(scene_state.get("当前地点"), str) and scene_state["当前地点"]:
+            session.current_location = scene_state["当前地点"][:200]
+        if isinstance(scene_state.get("当前场景"), str) and scene_state["当前场景"]:
+            session.current_scene = scene_state["当前场景"][:200]
         session.current_time = session.state.get("场景", {}).get("当前时间", session.current_time)
         session.danger_level = int(session.state.get("剧情", {}).get("敌对势力警觉", session.danger_level))
         session.state = {

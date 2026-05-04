@@ -4,6 +4,7 @@ from typing import Any
 
 from app.services.chunking import DocumentChunk
 from app.services.llm import LLMClient
+from app.services.prompt_config import build_turn_summary_prompt
 
 
 SUMMARY_KEYS = ["当前剧情摘要", "玩家已知线索", "玩家当前目标", "重要NPC状态", "未解决问题", "当前危险", "下一步可能方向"]
@@ -11,25 +12,7 @@ SUMMARY_KEYS = ["当前剧情摘要", "玩家已知线索", "玩家当前目标"
 
 def build_turn_summary(session: Any, state: dict[str, Any], llm: LLMClient) -> dict[str, Any]:
     fallback = fallback_summary(session, state)
-    prompt = [
-        {"role": "system", "content": "你是克苏鲁调查游戏的回合总结节点。只输出 JSON，所有字段使用中文。"},
-        {
-            "role": "user",
-            "content": (
-                f"已有会话摘要：{getattr(session, 'summary', '')}\n"
-                f"当前位置：{getattr(session, 'current_location', '')}\n"
-                f"当前场景：{getattr(session, 'current_scene', '')}\n"
-                f"当前时间：{getattr(session, 'current_time', '')}\n"
-                f"玩家行动：{state.get('player_input', '')}\n"
-                f"守秘人回应：{state.get('narration', '')}\n"
-                f"状态变化：{state.get('state_delta', {})}\n"
-                f"已发现线索：{[getattr(clue, 'name', '') for clue in getattr(session, 'clues', [])]}\n"
-                f"剧情状态：{state.get('story_state', {})}\n"
-                "输出 JSON 字段：当前剧情摘要, 玩家已知线索, 玩家当前目标, 重要NPC状态, 未解决问题, 当前危险, 下一步可能方向。"
-                "摘要应压缩为玩家可见信息，不泄露主持人秘密。"
-            ),
-        },
-    ]
+    prompt = build_turn_summary_prompt(session, state)
     generated = llm.chat_json(prompt, fallback=fallback)
     return normalize_summary(generated, fallback)
 
@@ -88,9 +71,9 @@ def fallback_summary(session: Any, state: dict[str, Any]) -> dict[str, Any]:
         "当前剧情摘要": f"在{getattr(session, 'current_location', '当前地点')}，玩家行动为：{recent_action}。{narration}",
         "玩家已知线索": [*existing_clues, *clue_names][-12:],
         "玩家当前目标": ["继续调查当前场景", "整理已知线索"],
-        "重要NPC状态": {},
+        "重要NPC状态": [],
         "未解决问题": ["灯塔熄灭的原因仍需确认", "岛上的异常来源仍不明确"],
-        "当前危险": f"危险等级 {getattr(session, 'danger_level', 1)}",
+        "当前危险": [f"危险等级 {getattr(session, 'danger_level', 1)}"],
         "下一步可能方向": ["检查附近可疑物", "前往新的可达地点", "整理线索并判断下一步"],
     }
 
@@ -99,10 +82,8 @@ def normalize_summary(value: dict[str, Any], fallback: dict[str, Any]) -> dict[s
     normalized: dict[str, Any] = {}
     for key in SUMMARY_KEYS:
         item = value.get(key, fallback.get(key))
-        if key in {"玩家已知线索", "玩家当前目标", "未解决问题", "下一步可能方向"}:
+        if key in {"玩家已知线索", "玩家当前目标", "重要NPC状态", "未解决问题", "当前危险", "下一步可能方向"}:
             normalized[key] = ensure_string_list(item)
-        elif key == "重要NPC状态":
-            normalized[key] = item if isinstance(item, dict) else {}
         else:
             normalized[key] = str(item or fallback.get(key) or "")[:4000]
     return normalized

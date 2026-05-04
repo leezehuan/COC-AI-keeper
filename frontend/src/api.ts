@@ -1,4 +1,4 @@
-import type { ActionResponse, Character, GameSession } from './types';
+import type { ActionResponse, ActionStreamEvent, Character, GameSession } from './types';
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -43,5 +43,39 @@ export const api = {
     request<ActionResponse>(`/api/sessions/${sessionId}/actions`, {
       method: 'POST',
       body: JSON.stringify({ message })
-    })
+    }),
+  streamAction: (sessionId: string, message: string, onEvent: (event: ActionStreamEvent) => void) =>
+    streamRequest(`/api/sessions/${sessionId}/actions/stream`, {
+      method: 'POST',
+      body: JSON.stringify({ message })
+    }, onEvent)
 };
+
+async function streamRequest(url: string, options: RequestInit, onEvent: (event: ActionStreamEvent) => void): Promise<void> {
+  const response = await fetch(url, {
+    headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
+    ...options
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(parseErrorMessage(detail, response.status));
+  }
+  if (!response.body) throw new Error('浏览器不支持流式响应');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      const text = line.trim();
+      if (!text) continue;
+      onEvent(JSON.parse(text) as ActionStreamEvent);
+    }
+    if (done) break;
+  }
+  const remaining = buffer.trim();
+  if (remaining) onEvent(JSON.parse(remaining) as ActionStreamEvent);
+}
