@@ -1,0 +1,49 @@
+# 环境变量与本地配置
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / 前端构建产物
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+.vite/
+frontend/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 本地数据、数据库与向量库
+data/chroma/
+*.sqlite
+*.sqlite3
+*.db
+
+# 日志与临时文件
+*.log
+*.tmp
+*.temp
+~$*
+
+# 操作系统与 IDE
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
