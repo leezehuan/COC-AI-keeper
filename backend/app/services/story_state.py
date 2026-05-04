@@ -51,7 +51,9 @@ def ensure_story_state(raw_state: dict[str, Any] | None, current_location: str, 
     memory.setdefault("当前场景摘要", "")
     memory.setdefault("重要裁定记录", [])
     state["秘密"].setdefault("已屏蔽条目", [])
-    add_unique(story["已访问地点"], current_location)
+    story["已访问地点"] = unique_locations(story.get("已访问地点", []))
+    story["当前可前往地点"] = unique_locations(story.get("当前可前往地点", []))
+    add_unique(story["已访问地点"], normalize_location_name(current_location))
     sync_available_locations(story["当前可前往地点"], current_location)
     return state
 
@@ -112,11 +114,11 @@ def apply_turn_delta(story_state: dict[str, Any], delta: dict[str, Any], current
     story = state["剧情"]
     scene = state["场景"]
     memory = state["记忆"]
-    target_location = str(delta.get("location") or current_location)
+    target_location = normalize_location_name(delta.get("location") or current_location) or current_location
     target_scene = str(delta.get("scene") or current_scene)
     add_unique(story["已访问地点"], target_location)
     for location in delta.get("story_updates", {}).get("available_locations", []):
-        sync_available_locations(story["当前可前往地点"], str(location))
+        sync_available_locations(story["当前可前往地点"], location)
     for event in delta.get("story_updates", {}).get("triggered_events", []):
         add_unique(story["已触发事件"], str(event))
     story["剧情flag"].update(delta.get("story_updates", {}).get("flags", {}))
@@ -158,10 +160,11 @@ def infer_available_locations(player_input: str, generated_delta: dict[str, Any]
 
 def append_locations(locations: list[str], value: Any) -> None:
     if isinstance(value, list):
-        locations.extend(str(item) for item in value if str(item).strip())
+        locations.extend(normalized for item in value if (normalized := normalize_location_name(item)))
         return
-    if isinstance(value, str) and value.strip():
-        locations.append(value)
+    normalized = normalize_location_name(value)
+    if normalized:
+        locations.append(normalized)
 
 
 def location_from_context_row(row: dict[str, Any]) -> str:
@@ -175,11 +178,38 @@ def location_from_context_row(row: dict[str, Any]) -> str:
 
 def unique_locations(locations: list[str]) -> list[str]:
     unique: list[str] = []
+    seen: set[str] = set()
     for location in locations:
-        value = str(location).strip(" \t\r\n，。；;:：")
-        if value and value not in unique:
+        value = normalize_location_name(location)
+        key = location_dedupe_key(value)
+        if value and key not in seen:
+            seen.add(key)
             unique.append(value[:120])
     return unique[:12]
+
+
+def normalize_location_name(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip(" \t\r\n，。；;:：")
+    if not text or text.lower() in {"none", "null", "undefined", "nan"}:
+        return ""
+    for prefix in ["起点", "当前位置", "当前地点", "地点", "可前往地点"]:
+        marker = f"{prefix}："
+        if text.startswith(marker):
+            text = text.removeprefix(marker).strip(" \t\r\n，。；;:：")
+        marker = f"{prefix}:"
+        if text.startswith(marker):
+            text = text.removeprefix(marker).strip(" \t\r\n，。；;:：")
+    return text
+
+
+def location_dedupe_key(value: str) -> str:
+    key = normalize_location_name(value)
+    for prefix in ["航标岛", "岛上", "岛"]:
+        if key.startswith(prefix) and len(key) > len(prefix) + 1:
+            key = key.removeprefix(prefix).strip(" 的之-—")
+    return key
 
 
 def infer_triggered_events(player_input: str, generated_clues: list[dict[str, Any]]) -> list[str]:
@@ -256,7 +286,14 @@ def append_limited(items: list[Any], value: Any, limit: int) -> None:
 
 
 def sync_available_locations(items: list[Any], location: str) -> None:
-    add_unique(items, location)
+    normalized = normalize_location_name(location)
+    if not normalized:
+        return
+    key = location_dedupe_key(normalized)
+    for item in items:
+        if location_dedupe_key(str(item)) == key:
+            return
+    items.append(normalized)
 
 
 def clamp_int(value: int, minimum: int, maximum: int) -> int:

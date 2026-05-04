@@ -480,7 +480,24 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 function asStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+  if (!Array.isArray(value)) return [];
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const text = normalizeDisplayText(item);
+    const key = text.replace(/^(起点|当前位置|当前地点|地点|可前往地点)[:：]/, '').trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(key);
+  }
+  return result;
+}
+
+function normalizeDisplayText(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  const text = String(value).trim();
+  if (!text || ['null', 'none', 'undefined', 'nan'].includes(text.toLowerCase())) return '';
+  return text;
 }
 
 interface AttributeRow {
