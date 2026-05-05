@@ -16,7 +16,7 @@ export default function App() {
   const [options, setOptions] = useState<string[]>(['观察海面和灯塔', '划向北岸码头', '检查救生艇', '自定义行动']);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState('等待初始化');
+  const [status, setStatus] = useState('等待导入资料');
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -57,9 +57,9 @@ export default function App() {
       setCharacters(list);
       const defaultCharacter = list.find((item) => item.archetype === '调查局探员') ?? list[0];
       if (defaultCharacter) setSelectedCharacter(defaultCharacter.id);
-      setStatus(list.length ? '已加载角色' : '请先初始化并导入资料');
+      setStatus(list.length ? '已加载角色' : '请在服务器命令行导入资料');
     } catch {
-      setStatus('请先初始化数据库并导入资料');
+      setStatus('请在服务器命令行初始化数据库并导入资料');
     }
   }
 
@@ -72,24 +72,6 @@ export default function App() {
     } catch {
       setSavedSessions([]);
       setSelectedSession('');
-    }
-  }
-
-  async function initialize() {
-    setBusy(true);
-    setError('');
-    try {
-      setStatus('正在初始化数据库...');
-      await api.init();
-      setStatus('正在导入剧本、规则书和角色卡...');
-      const result = await api.importContent(false);
-      setStatus(`导入完成：剧本 ${result.scenario_chunks} 块，规则 ${result.rule_chunks} 块，实体 ${result.scenario_entities} 个，线索索引 ${result.clue_index} 条，角色 ${result.characters} 个`);
-      await loadCharacters();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setStatus('初始化失败');
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -227,7 +209,6 @@ export default function App() {
           <h1>《无光的灯塔》</h1>
         </div>
         <div className="toolbar">
-          <button onClick={initialize} disabled={busy}>初始化/导入</button>
           <details className="picker-panel character-panel">
             <summary>{selectedCharacterLabel(characters, selectedCharacter)}</summary>
             <div className="picker-list character-picker">

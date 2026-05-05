@@ -26,12 +26,6 @@ function parseErrorMessage(detail: string, status: number): string {
 }
 
 export const api = {
-  init: () => request<{ status: string }>(`${apiBase}/init`, { method: 'POST' }),
-  importContent: (resetChroma = false) =>
-    request<{ scenario_id: string; scenario_chunks: number; rule_chunks: number; scenario_entities: number; clue_index: number; characters: number }>(`${apiBase}/import`, {
-      method: 'POST',
-      body: JSON.stringify({ reset_chroma: resetChroma, import_characters: true })
-    }),
   characters: () => request<Character[]>(`${apiBase}/characters`),
   sessions: () => request<GameSession[]>(`${apiBase}/sessions`),
   getSession: (sessionId: string) => request<GameSession>(`${apiBase}/sessions/${sessionId}`),
