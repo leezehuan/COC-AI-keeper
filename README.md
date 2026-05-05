@@ -1,6 +1,6 @@
 # 克苏鲁守秘人轻量版 🕯️
 
-> 基于 `FastAPI + LangGraph + React/Vite + PostgreSQL + Chroma` 的《克苏鲁的呼唤》调查游戏守秘人网页版原型
+> 基于 `FastAPI + LangGraph + React/Vite + PostgreSQL + Chroma`，以 `KeeperAgent` 为核心的《克苏鲁的呼唤》调查游戏 AI 守秘人网页版原型
 
 ---
 
@@ -12,14 +12,14 @@
 
 ## 📖 项目简介
 
-**克苏鲁守秘人轻量版**是一个面向单玩家跑团场景的 AI 守秘人原型系统。当前以内置剧本《无光的灯塔》为核心，提供网页化调查体验，并通过 LangGraph 编排守秘人回合逻辑。
+**克苏鲁守秘人轻量版**是一个面向单玩家跑团场景的 AI 守秘人原型系统。当前以内置剧本《无光的灯塔》为核心，提供网页化调查体验，并通过 `KeeperAgent` 编排守秘人回合逻辑。
 
-系统会在玩家每次行动后执行意图识别、上下文检索、规则裁定、骰点/技能检定、叙事生成、状态更新、防剧透校验和长期记忆写入，让玩家可以在浏览器中进行连续调查。
+系统的核心是后端 `KeeperAgent`：它使用 LangGraph `StateGraph` 将一次玩家行动拆解为“读档、理解意图、检索剧本与规则、裁定与骰点、生成叙事、校验状态、防剧透、提交持久化”的可追踪流程，让玩家可以在浏览器中进行连续调查。
 
 核心能力包括：
 
 - **单玩家跑团界面**：React/Vite 前端提供角色选择、会话创建、旧档恢复、玩家行动输入和下一步行动选项。
-- **LangGraph 守秘人流程**：后端使用状态图串联意图解析、检索增强、规则裁定、叙事生成与状态提交。
+- **KeeperAgent 智能守秘人**：后端核心 Agent 串联意图解析、RAG 检索、规则裁定、骰点工具、叙事生成、状态校验、防剧透与记忆写入。
 - **RAG 增强检索**：使用 Chroma 存储剧本、规则书、结构化实体、线索索引和会话记忆向量。
 - **数据库持久化**：PostgreSQL 保存角色、会话、线索、道具、flag 与回合日志。
 - **规则工具层**：内置 D100、技能检定、基础理智检定和轻量行动裁定。
@@ -33,7 +33,7 @@
 | 特性 | 说明 |
 |------|------|
 | **后端框架** | FastAPI，提供初始化、导入、角色、会话、行动提交等 API |
-| **Agent 编排** | LangGraph `StateGraph` 编排守秘人回合流程 |
+| **Agent 编排** | `KeeperAgent` 基于 LangGraph `StateGraph` 编排守秘人回合，是玩家行动后的核心决策链路 |
 | **前端** | React + Vite + TypeScript 网页界面 |
 | **关系数据库** | PostgreSQL，保存游戏会话和结构化状态 |
 | **向量数据库** | Chroma，本地持久化剧本、规则和记忆索引 |
@@ -64,12 +64,12 @@
 └──────────────────────┬───────────────────────┘
                        │
 ┌──────────────────────▼───────────────────────┐
-│           KeeperAgent (LangGraph)             │
-│  load_state → parse_intent → retrieve_context │
-│  → adjudicate → roll_tools → resolve_action   │
-│  → generate_response → generate_state_delta   │
-│  → validate_state_delta → secret_leak_check   │
-│  → generate_next_options → commit_state       │
+│        KeeperAgent：AI 守秘人核心             │
+│  LangGraph StateGraph 编排每个玩家行动回合     │
+│  - 意图识别 / 模糊行动澄清                    │
+│  - RAG 检索剧本、规则、实体、线索、长期记忆     │
+│  - 规则裁定、D100、技能检定、理智检定          │
+│  - 叙事生成、状态变更、防剧透校验、持久化       │
 └──────────────┬───────────────────┬───────────┘
                │                   │
 ┌──────────────▼─────────────┐ ┌───▼────────────────────┐
@@ -78,8 +78,56 @@
 │ - 线索/道具/Story Flag      │ │ - 规则分块              │
 │ - 当前地点/场景/时间         │ │ - 实体/线索索引          │
 └────────────────────────────┘ │ - 会话长期记忆           │
+                               └───────────┬────────────┘
+                                           │
+                               ┌───────────▼────────────┐
+                               │ OpenAI 兼容 LLM / Embedding │
+                               │ - 意图 JSON              │
+                               │ - 守秘人叙事             │
+                               │ - 向量化检索             │
                                └────────────────────────┘
 ```
+
+---
+
+## 🧠 KeeperAgent 设计重点
+
+`KeeperAgent` 是本项目最核心的后端模块，位于 `backend/app/services/agent.py`。前端提交玩家行动后，FastAPI 的 `/coc/api/sessions/{session_id}/actions` 或 `/coc/api/sessions/{session_id}/actions/stream` 会调用 `get_agent().run_turn(...)`，由 Agent 完成一次完整守秘人回合。
+
+### Agent 的职责边界
+
+| 职责 | 说明 |
+|------|------|
+| **会话状态读取** | 从 PostgreSQL 加载角色、会话、线索、道具、Story Flag 和回合日志 |
+| **玩家意图理解** | 通过 LLM JSON 输出与启发式规则识别行动类型、目标、技能和是否需要澄清 |
+| **检索增强上下文** | 从 Chroma 检索剧本、规则书、结构化实体、线索索引和会话长期记忆 |
+| **规则与骰点裁定** | 调用规则工具执行行动难度判断、D100、技能检定和理智检定 |
+| **叙事生成** | 将角色状态、场景上下文、裁定结果和检索内容交给 LLM 生成玩家可见回应 |
+| **状态变更控制** | 生成并校验地点、场景、时间、危险等级、线索和物品变化 |
+| **防剧透处理** | 过滤不应直接暴露给玩家的主持人秘密，并清洗下一步行动选项 |
+| **持久化与记忆** | 写入回合日志、更新会话状态、同步线索/道具，并将回合摘要写入长期记忆向量库 |
+
+### Agent 状态流
+
+`KeeperState` 是 Agent 节点之间传递的状态容器，关键字段包括：
+
+- **输入上下文**：`db`、`session_id`、`player_input`、`session`、`character`
+- **理解与检索**：`intent`、`scenario_context`、`rule_context`、`entity_context`、`clue_context`、`memory_context`
+- **裁定结果**：`adjudication`、`dice_results`、`skill_checks`、`sanity_checks`、`resolution`
+- **输出与状态**：`narration`、`options`、`state_delta`、`validation_report`、`leak_report`、`discovered_clues`
+- **审计与记忆**：`audit`、`summary`、`story_state`、`needs_clarification`
+
+### Agent 协作模块
+
+| 模块 | Agent 中的作用 |
+|------|----------------|
+| `llm.py` | 调用 OpenAI 兼容聊天模型，生成意图 JSON、守秘人叙事和摘要 |
+| `retrieval.py` | 查询和写入 Chroma 集合，为 RAG 和长期记忆提供数据 |
+| `rules.py` | 提供轻量 COC 裁定、D100、技能检定和理智检定 |
+| `guardrails.py` | 校验状态变更、识别偏离剧情、清洗剧透文本与选项 |
+| `story_state.py` | 构造并应用结构化剧情状态变化 |
+| `summary.py` | 生成回合摘要并沉淀为会话记忆 |
+| `inventory.py` | 根据 `state_delta` 同步会话物品变化 |
 
 ---
 
@@ -97,7 +145,7 @@ coc-lite/
 │       ├── models.py              # PostgreSQL 数据模型
 │       ├── schemas.py             # API 请求/响应模型
 │       └── services/
-│           ├── agent.py           # LangGraph 守秘人核心流程
+│           ├── agent.py           # KeeperAgent 核心 Agent 与 LangGraph 状态图节点
 │           ├── importer.py        # 剧本、规则书、角色导入
 │           ├── retrieval.py       # Chroma 检索服务
 │           ├── llm.py             # OpenAI 兼容 LLM 客户端
@@ -303,8 +351,8 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8000/coc/api/import -ContentType
 | `/coc/api/sessions` | POST | 创建新会话 |
 | `/coc/api/sessions/{session_id}` | GET | 获取指定会话详情 |
 | `/coc/api/sessions/{session_id}` | DELETE | 删除指定会话及其记忆分块 |
-| `/coc/api/sessions/{session_id}/actions` | POST | 提交玩家行动并返回完整响应 |
-| `/coc/api/sessions/{session_id}/actions/stream` | POST | 提交流式玩家行动，返回 NDJSON 事件 |
+| `/coc/api/sessions/{session_id}/actions` | POST | 提交玩家行动，调用 `KeeperAgent` 并返回完整响应 |
+| `/coc/api/sessions/{session_id}/actions/stream` | POST | 提交流式玩家行动，调用 `KeeperAgent` 并返回 NDJSON 事件 |
 
 ---
 
@@ -317,7 +365,12 @@ load_state
   └─ 加载会话、角色、线索、道具、flag 和故事状态
 
 parse_intent
-  └─ 识别玩家意图、目标、可能技能和是否需要澄清
+  ├─ 识别玩家意图、目标、可能技能和是否需要澄清
+  ├─ 模糊行动进入 clarify_action
+  └─ 明确行动继续 retrieve_context
+
+clarify_action
+  └─ 返回澄清问题、候选行动选项，并直接进入 commit_state
 
 retrieve_context
   ├─ 检索剧本分块 scenario_chunks
@@ -326,11 +379,12 @@ retrieve_context
   ├─ 检索线索索引 clue_index
   └─ 检索当前会话长期记忆 session_memory_chunks
 
-adjudicate / roll_tools
-  └─ 执行轻量规则裁定、D100、技能检定和理智检定
+adjudicate / roll_tools / resolve_action
+  ├─ 执行轻量规则裁定、D100、技能检定和理智检定
+  └─ 结合剧情偏离检测形成行动解决结果
 
 generate_response
-  └─ 生成玩家可见叙事
+  └─ 基于检索上下文、裁定结果和角色状态生成玩家可见叙事
 
 generate_state_delta / validate_state_delta
   └─ 生成并校验地点、场景、时间、线索、道具和危险等级变化
@@ -342,7 +396,7 @@ generate_next_options
   └─ 生成下一步行动建议
 
 commit_state
-  └─ 写入数据库、回合日志、摘要和会话长期记忆
+  └─ 写入数据库、回合日志、摘要和会话长期记忆，然后结束本回合
 ```
 
 ---

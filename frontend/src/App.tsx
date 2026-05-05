@@ -1,12 +1,14 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import type { ActionResponse, Character, ChatMessage, GameSession, InventoryItem } from './types';
 
 const assetBase = `${import.meta.env.BASE_URL.replace(/\/$/, '')}/assets`;
+const guideStorageKey = 'coc-lite-new-user-guide-seen';
 
 const openingText = '现在是 1926 年四月十二日，晚上八点十五分左右。航标岛上的灯塔在暴风雨前熄灭，埃塞克斯号触礁沉没。你坐在救生艇里，黑暗的海面拍打船舷，远处只有灯塔底部透出微弱的光。';
 
 export default function App() {
+  const sessionPanelRef = useRef<HTMLDetailsElement>(null);
   const [characters, setCharacters] = useState<Character[]>([]);
   const [savedSessions, setSavedSessions] = useState<GameSession[]>([]);
   const [selectedSession, setSelectedSession] = useState('');
@@ -18,11 +20,55 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('等待导入资料');
   const [error, setError] = useState('');
+  const [showGuide, setShowGuide] = useState(false);
+  const [showCharacterDialog, setShowCharacterDialog] = useState(false);
 
   useEffect(() => {
     void loadCharacters();
     void loadSessions();
   }, []);
+
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(guideStorageKey) !== 'true') setShowGuide(true);
+    } catch {
+      setShowGuide(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    function closeMenusOnOutsideClick(event: MouseEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      const panel = sessionPanelRef.current;
+      if (panel?.open && !panel.contains(target)) panel.open = false;
+    }
+
+    document.addEventListener('pointerdown', closeMenusOnOutsideClick);
+    return () => document.removeEventListener('pointerdown', closeMenusOnOutsideClick);
+  }, []);
+
+  useEffect(() => {
+    if (!showGuide) return;
+
+    function closeGuideOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') closeGuide();
+    }
+
+    document.addEventListener('keydown', closeGuideOnEscape);
+    return () => document.removeEventListener('keydown', closeGuideOnEscape);
+  }, [showGuide]);
+
+  useEffect(() => {
+    if (!showCharacterDialog) return;
+
+    function closeCharacterDialogOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape' && !busy) setShowCharacterDialog(false);
+    }
+
+    document.addEventListener('keydown', closeCharacterDialogOnEscape);
+    return () => document.removeEventListener('keydown', closeCharacterDialogOnEscape);
+  }, [showCharacterDialog, busy]);
 
   const sortedSkills = useMemo<[string, number][]>(() => {
     if (!session) return [];
@@ -41,6 +87,11 @@ export default function App() {
   const derivedAttributes = asRecord(asRecord(session?.character.attributes)['派生属性']);
   const storyFlags = formatFlagEntries(storyState['剧情flag']);
   const auditEntries = formatAuditEntries(asRecord(session?.state['last_audit']));
+  const recommendedCharacter = useMemo(() => characters.find((item) => item.archetype === '调查局探员') ?? null, [characters]);
+  const characterOptions = useMemo(() => {
+    if (!recommendedCharacter) return characters;
+    return [recommendedCharacter, ...characters.filter((item) => item.id !== recommendedCharacter.id)];
+  }, [characters, recommendedCharacter]);
   const debugEntries = [
     `危险等级：${String(session?.danger_level ?? '无')}`,
     `时间压力：${String(storyState['时间压力'] ?? '普通')}`,
@@ -75,17 +126,30 @@ export default function App() {
     }
   }
 
-  async function startSession() {
+  function openCharacterDialog() {
+    if (busy || !characters.length) return;
+    const selectedExists = characters.some((item) => item.id === selectedCharacter);
+    const defaultCharacter = recommendedCharacter ?? characters[0];
+    if (!selectedExists && defaultCharacter) setSelectedCharacter(defaultCharacter.id);
+    setError('');
+    setShowCharacterDialog(true);
+  }
+
+  async function startSession(characterId = selectedCharacter) {
+    const characterToUse = characterId || recommendedCharacter?.id || characters[0]?.id;
+    if (!characterToUse) return;
     setBusy(true);
     setError('');
     try {
-      const created = await api.createSession(selectedCharacter || undefined);
+      const created = await api.createSession(characterToUse);
       setSession(created);
       setMessages([{ role: 'keeper', content: openingText }]);
       setOptions(['观察海面和灯塔', '划向北岸码头', '检查救生艇', '自定义行动']);
       setStatus(`会话已创建：${created.character.archetype}`);
+      setShowCharacterDialog(false);
       await loadSessions();
     } catch (err) {
+      setShowCharacterDialog(false);
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
@@ -143,6 +207,15 @@ export default function App() {
     setMessages([{ role: 'keeper', content: openingText }]);
     setOptions(['观察海面和灯塔', '划向北岸码头', '检查救生艇', '自定义行动']);
     setInput('');
+  }
+
+  function closeGuide() {
+    setShowGuide(false);
+    try {
+      window.localStorage.setItem(guideStorageKey, 'true');
+    } catch {
+      void 0;
+    }
   }
 
   async function send(message: string) {
@@ -209,24 +282,9 @@ export default function App() {
           <h1>《无光的灯塔》</h1>
         </div>
         <div className="toolbar">
-          <details className="picker-panel character-panel">
-            <summary>{selectedCharacterLabel(characters, selectedCharacter)}</summary>
-            <div className="picker-list character-picker">
-              {characters.length === 0 ? <span className="picker-empty">暂无角色</span> : characters.map((character) => (
-                <button
-                  className={`picker-item character-chip ${selectedCharacter === character.id ? 'active' : ''}`}
-                  key={character.id}
-                  onClick={() => setSelectedCharacter(character.id)}
-                  disabled={busy}
-                >
-                  <span>{character.archetype}</span>
-                  <small>{character.occupation || '调查员'}</small>
-                </button>
-              ))}
-            </div>
-          </details>
-          <button className="primary" onClick={startSession} disabled={busy || !characters.length}>开始会话</button>
-          <details className="session-panel">
+          <button className="guide-button" onClick={() => setShowGuide(true)}>新手引导</button>
+          <button className="primary" onClick={openCharacterDialog} disabled={busy || !characters.length}>开始会话</button>
+          <details className="session-panel" ref={sessionPanelRef}>
             <summary>历史会话 {savedSessions.length ? `(${savedSessions.length})` : ''}</summary>
             <div className="session-picker">
               {savedSessions.length === 0 ? <span className="session-empty">暂无会话</span> : savedSessions.map((item) => (
@@ -262,6 +320,87 @@ export default function App() {
           </details>
         </div>
       </header>
+
+      {showGuide && (
+        <div className="guide-overlay" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) closeGuide();
+        }}>
+          <section className="guide-modal" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+            <div className="guide-header">
+              <div>
+                <p className="eyebrow">调查员简报</p>
+                <h2 id="guide-title">新手引导</h2>
+              </div>
+              <button className="guide-close" onClick={closeGuide} aria-label="关闭新手引导">×</button>
+            </div>
+            <p className="guide-intro">你将扮演调查员，在守秘人的叙事中探索航标岛与熄灭的灯塔。</p>
+            <div className="guide-sections">
+              <article className="guide-section">
+                <h3>游戏背景</h3>
+                <p>1926 年暴风雨前夜，灯塔熄灭，船只触礁。岛上微光、失踪者与异常现象等待调查。</p>
+              </article>
+              <article className="guide-section">
+                <h3>游戏目标</h3>
+                <p>收集线索、管理物品与状态，判断危险来源，并尽可能揭开灯塔熄灭的真相。</p>
+              </article>
+              <article className="guide-section">
+                <h3>操作方法</h3>
+                <ul>
+                  <li>点击“开始会话”后选择角色，推荐使用“调查局探员”。</li>
+                  <li>点击行动选项，或在输入框描述自定义行动。</li>
+                  <li>查看右侧物品、地图和线索辅助决策。</li>
+                </ul>
+              </article>
+            </div>
+            <div className="guide-actions">
+              <button className="primary" onClick={closeGuide}>开始调查</button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {showCharacterDialog && (
+        <div className="character-overlay" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !busy) setShowCharacterDialog(false);
+        }}>
+          <section className="character-modal" role="dialog" aria-modal="true" aria-labelledby="character-title">
+            <div className="guide-header">
+              <div>
+                <p className="eyebrow">调查员建档</p>
+                <h2 id="character-title">选择角色</h2>
+              </div>
+              <button className="guide-close" onClick={() => setShowCharacterDialog(false)} disabled={busy} aria-label="关闭角色选择">×</button>
+            </div>
+            <p className="guide-intro">选择一名调查员开始新的会话。</p>
+            <div className="character-picker-grid">
+              {characterOptions.map((character) => {
+                const recommended = character.id === recommendedCharacter?.id;
+                return (
+                  <button
+                    className={`character-option ${selectedCharacter === character.id ? 'active' : ''} ${recommended ? 'recommended' : ''}`}
+                    key={character.id}
+                    onClick={() => setSelectedCharacter(character.id)}
+                    disabled={busy}
+                    aria-pressed={selectedCharacter === character.id}
+                  >
+                    <span>
+                      <strong>{character.archetype}</strong>
+                      {recommended && <small className="recommend-badge">推荐角色</small>}
+                    </span>
+                    <small>{character.occupation || '调查员'}</small>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="character-actions">
+              <button onClick={() => setShowCharacterDialog(false)} disabled={busy}>取消</button>
+              <button className="primary" onClick={() => void startSession()} disabled={busy || !selectedCharacter}>
+                {busy ? '创建中...' : '确认开始'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {error && <div className="error">{error}</div>}
       <div className="status">{busy ? '处理中...' : status}</div>
@@ -330,6 +469,33 @@ export default function App() {
 
         <aside className="side-panel">
           <section className="card">
+            <h2>物品栏</h2>
+            {session ? <InventoryList items={session.inventory_items} /> : <p>尚未创建会话。</p>}
+          </section>
+
+          <section className="card">
+            <h2>材料与地图</h2>
+            <div className="asset-links">
+              <a href={`${assetBase}/附件/航标岛地图.png`} target="_blank">航标岛地图</a>
+              <a href={`${assetBase}/附件/航标岛灯塔地图.png`} target="_blank">灯塔地图</a>
+              <a href={`${assetBase}/附件/材料1.png`} target="_blank">材料 1</a>
+              <a href={`${assetBase}/附件/材料2.png`} target="_blank">材料 2</a>
+              <a href={`${assetBase}/附件/材料3.png`} target="_blank">材料 3</a>
+            </div>
+          </section>
+
+          <section className="card">
+            <h2>线索簿</h2>
+            {session?.clues.length ? session.clues.map((clue) => (
+              <details key={clue.id}>
+                <summary>{clue.name}</summary>
+                <p>{clue.content}</p>
+                {clue.source_location && <small>来源：{clue.source_location}</small>}
+              </details>
+            )) : <p>尚未记录线索。</p>}
+          </section>
+
+          <section className="card">
             <h2>剧情状态</h2>
             {session ? (
               <>
@@ -348,33 +514,6 @@ export default function App() {
                 <TagList title="最近行动" items={recentActions} emptyText="暂无行动记录。" />
               </>
             ) : <p>尚未创建会话。</p>}
-          </section>
-
-          <section className="card">
-            <h2>物品栏</h2>
-            {session ? <InventoryList items={session.inventory_items} /> : <p>尚未创建会话。</p>}
-          </section>
-
-          <section className="card">
-            <h2>线索簿</h2>
-            {session?.clues.length ? session.clues.map((clue) => (
-              <details key={clue.id}>
-                <summary>{clue.name}</summary>
-                <p>{clue.content}</p>
-                {clue.source_location && <small>来源：{clue.source_location}</small>}
-              </details>
-            )) : <p>尚未记录线索。</p>}
-          </section>
-
-          <section className="card">
-            <h2>材料与地图</h2>
-            <div className="asset-links">
-              <a href={`${assetBase}/附件/航标岛地图.png`} target="_blank">航标岛地图</a>
-              <a href={`${assetBase}/附件/航标岛灯塔地图.png`} target="_blank">灯塔地图</a>
-              <a href={`${assetBase}/附件/材料1.png`} target="_blank">材料 1</a>
-              <a href={`${assetBase}/附件/材料2.png`} target="_blank">材料 2</a>
-              <a href={`${assetBase}/附件/材料3.png`} target="_blank">材料 3</a>
-            </div>
           </section>
 
           <details className="card debug-card">
@@ -455,11 +594,6 @@ function buildInventoryMeta(metadata: Record<string, unknown>): string {
   if (metadata['来源']) parts.push(`来源：${String(metadata['来源'])}`);
   if (metadata['最近原因']) parts.push(`最近：${String(metadata['最近原因'])}`);
   return parts.join(' · ');
-}
-
-function selectedCharacterLabel(characters: Character[], selectedCharacter: string): string {
-  const character = characters.find((item) => item.id === selectedCharacter);
-  return character ? `角色：${character.archetype}` : '选择角色';
 }
 
 function buildActionMeta(response: ActionResponse): string {
