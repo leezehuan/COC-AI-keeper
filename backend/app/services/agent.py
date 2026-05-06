@@ -25,6 +25,7 @@ from app.utils import safe_key
 
 
 class KeeperState(TypedDict, total=False):
+    # LangGraph 在各节点之间传递的共享状态，包含数据库对象、检索上下文和本回合产物。
     db: Session
     session_id: str
     player_input: str
@@ -62,10 +63,12 @@ class KeeperAgent:
         self.graph = self._build_graph()
 
     def run_turn(self, db: Session, session_id: str, player_input: str) -> KeeperState:
+        # 每次玩家输入都会启动一次完整守秘人回合，并返回最终状态供 API 序列化。
         initial: KeeperState = {"db": db, "session_id": session_id, "player_input": player_input}
         return self.graph.invoke(initial)
 
     def _build_graph(self):
+        # 回合流程：载入状态 -> 理解意图 -> 检索资料 -> 规则裁定 -> 生成叙事 -> 校验并落库。
         graph = StateGraph(KeeperState)
         graph.add_node("load_state", self.load_state)
         graph.add_node("parse_intent", self.parse_intent)
@@ -97,6 +100,7 @@ class KeeperAgent:
         return graph.compile()
 
     def load_state(self, state: KeeperState) -> KeeperState:
+        # 先加载会话及其关联数据，保证后续节点不触发额外懒加载或拿到不完整上下文。
         db = state["db"]
         session = (
             db.query(models.GameSession)
@@ -116,6 +120,7 @@ class KeeperAgent:
         return state
 
     def parse_intent(self, state: KeeperState) -> KeeperState:
+        # LLM 解析失败时使用启发式结果兜底，确保流程始终能继续或提出澄清。
         session = state["session"]
         message = state["player_input"]
         fallback = heuristic_intent(message)
@@ -138,6 +143,7 @@ class KeeperAgent:
         return state
 
     def retrieve_context(self, state: KeeperState) -> KeeperState:
+        # 用玩家输入、当前位置和意图拼接检索查询，同时拉取剧本、实体、线索、记忆与规则。
         session = state["session"]
         intent = state["intent"]
         query = " ".join([session.current_location, session.current_scene, state["player_input"], str(intent.get("target", "")), str(intent.get("skill", ""))])
@@ -164,6 +170,7 @@ class KeeperAgent:
         return state
 
     def adjudicate(self, state: KeeperState) -> KeeperState:
+        # 根据角色技能、场景上下文和推断技能决定本轮是否需要检定及其难度。
         intent = state["intent"]
         character = state["character"]
         skill_name = normalize_skill(intent.get("skill") or infer_skill(state["player_input"]))
@@ -180,6 +187,7 @@ class KeeperAgent:
         return state
 
     def roll_tools(self, state: KeeperState) -> KeeperState:
+        # 规则工具统一处理掷骰、技能检定和理智检定，避免 LLM 自行编造结果。
         results = execute_rule_tools(state["adjudication"], state["character"].san_current)
         state["dice_results"] = results["dice_results"]
         state["skill_checks"] = results["skill_checks"]
@@ -187,6 +195,7 @@ class KeeperAgent:
         return state
 
     def resolve_action(self, state: KeeperState) -> KeeperState:
+        # 将规则结果和偏离剧情判断整理成 LLM 可引用的“裁定摘要”。
         divergence = classify_divergence(state["player_input"], state.get("story_state", {}))
         state["divergence"] = divergence
         state["resolution"] = {
@@ -198,6 +207,7 @@ class KeeperAgent:
         return state
 
     def generate_response(self, state: KeeperState) -> KeeperState:
+        # 只把玩家可见信息送入回应提示词，隐藏线索和主持人秘密会在后续再次过滤。
         if state.get("needs_clarification"):
             question = state["intent"].get("clarification_question") or "你想具体调查哪里，或以什么方式行动？"
             state["narration"] = question
@@ -242,6 +252,7 @@ class KeeperAgent:
         return state
 
     def generate_state_delta(self, state: KeeperState) -> KeeperState:
+        # 把 LLM 给出的自由格式 state_delta 收敛为项目内部稳定的结构化增量。
         payload = state.get("generated_payload", {})
         fallback = fallback_response(state)
         generated_delta = payload.get("state_delta") if isinstance(payload.get("state_delta"), dict) else fallback["state_delta"]
@@ -266,12 +277,14 @@ class KeeperAgent:
         return state
 
     def validate_state_delta_node(self, state: KeeperState) -> KeeperState:
+        # 校验并修正状态增量，防止非法地点、危险值或剧情字段污染会话状态。
         validated_delta, report = validate_state_delta(state.get("state_delta", {}), state.get("story_state", {}))
         state["state_delta"] = validated_delta
         state["validation_report"] = report
         return state
 
     def secret_leak_check(self, state: KeeperState) -> KeeperState:
+        # 最后一道玩家可见文本防线：屏蔽尚未发现的线索和可能剧透的选项。
         known_clues = [clue.name for clue in state["session"].clues] + state.get("state_delta", {}).get("generated_clues", [])
         safe_text, text_report = sanitize_player_output(state.get("narration", ""), known_clues)
         safe_options, option_report = sanitize_options(state.get("options", []), known_clues)
@@ -281,6 +294,7 @@ class KeeperAgent:
         return state
 
     def generate_next_options(self, state: KeeperState) -> KeeperState:
+        # 在 LLM 选项基础上追加引导项，并保证最终始终保留“自定义行动”。
         options = ensure_options(state.get("options", []))
         if state.get("divergence", {}).get("needs_guidance"):
             options = ["寻找现实可行的调查方向", *options]
@@ -291,6 +305,7 @@ class KeeperAgent:
         return state
 
     def commit_state(self, state: KeeperState) -> KeeperState:
+        # 统一提交本回合副作用：角色状态、剧情状态、线索、物品、日志和向量记忆。
         db = state["db"]
         session = state["session"]
         character = state["character"]
@@ -298,6 +313,7 @@ class KeeperAgent:
         discovered: list[models.Clue] = []
 
         for san in state.get("sanity_checks", []):
+            # 理智检定结果由规则工具生成，落库时只接受该确定结果。
             character.san_current = int(san["san_after"])
 
         delta = state.get("state_delta", {})
@@ -324,6 +340,7 @@ class KeeperAgent:
         }
 
         for clue_payload in delta.get("generated_clues", []):
+            # clue_key 用于幂等去重，防止同一线索在重复回合中反复创建。
             if not isinstance(clue_payload, dict):
                 continue
             clue_key = safe_key(str(clue_payload.get("clue_key") or clue_payload.get("name") or "clue"))
@@ -344,6 +361,7 @@ class KeeperAgent:
             discovered.append(clue)
 
         inventory_results = apply_inventory_changes(db, session, delta.get("inventory_changes", []), turn_index)
+        # 物品变更结果写回 state，便于前端展示“获得/使用/移除”摘要。
         if inventory_results.get("applied") or inventory_results.get("ignored"):
             delta["inventory_results"] = inventory_results
             session.state["last_inventory_changes"] = inventory_results
@@ -372,6 +390,7 @@ class KeeperAgent:
         db.add(log)
         memory_chunks = [chunk for chunk in [build_session_memory_chunk(session.id, turn_index, state), build_summary_memory_chunk(session.id, turn_index, summary)] if chunk is not None]
         if memory_chunks:
+            # 会话记忆写入向量库，后续检索可引用玩家已经历过的内容。
             self.retrieval.upsert_chunks("session_memory_chunks", memory_chunks)
         db.commit()
         db.refresh(session)
@@ -381,6 +400,7 @@ class KeeperAgent:
 
 
 def heuristic_intent(message: str) -> dict[str, Any]:
+    # 意图解析兜底逻辑：LLM 不可用时仍能粗略识别行动类型、目标和技能。
     target = ""
     for marker in ["检查", "调查", "查看", "观察", "搜索", "询问", "前往", "进入"]:
         if marker in message:
@@ -409,6 +429,7 @@ def infer_action_type(message: str) -> str:
 
 
 def infer_skill(message: str) -> str:
+    # 用关键词映射常见 CoC 技能，作为裁定节点的默认技能输入。
     mapping = [
         (["听", "声音"], "聆听"),
         (["脚印", "追踪", "跟踪"], "追踪"),
@@ -454,6 +475,7 @@ def format_inventory(items: list[models.InventoryItem]) -> str:
 
 
 def filter_player_visible_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # 普通线索上下文不允许把“主持人秘密”直接交给玩家可见叙事。
     visible: list[dict[str, Any]] = []
     for row in rows:
         metadata = row.get("metadata") or {}
@@ -486,6 +508,7 @@ def format_location_names(rows: list[dict[str, Any]]) -> str:
 
 
 def build_session_memory_chunk(session_id: str, turn_index: int, state: KeeperState) -> DocumentChunk | None:
+    # 每回合生成一条可检索记忆，让长期会话能回忆玩家行动和守秘人回应。
     narration = state.get("narration", "").strip()
     player_input = state.get("player_input", "").strip()
     if not narration and not player_input:
@@ -513,6 +536,7 @@ def build_session_memory_chunk(session_id: str, turn_index: int, state: KeeperSt
 
 
 def ensure_options(value: Any) -> list[str]:
+    # 规范化下一步选项：去重、截断，并固定追加“自定义行动”。
     if not isinstance(value, list):
         return default_options()
     options: list[str] = []
@@ -569,6 +593,7 @@ def default_options() -> list[str]:
 
 
 def should_offer_clue_hint(state: KeeperState) -> bool:
+    # 多回合没有新线索时，主动提供回顾线索的软提示，降低卡关概率。
     generated_clues = state.get("state_delta", {}).get("generated_clues", [])
     if isinstance(generated_clues, list) and generated_clues:
         return False

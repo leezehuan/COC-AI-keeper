@@ -11,6 +11,7 @@ STATE_VERSION = 1
 
 
 def ensure_story_state(raw_state: dict[str, Any] | None, current_location: str, current_scene: str, current_time: str) -> dict[str, Any]:
+    # 将旧会话或空会话状态补齐为统一结构，后续状态更新都依赖这些固定分区。
     state = deepcopy(raw_state or {})
     state.setdefault("版本", STATE_VERSION)
     state.setdefault("剧情", {})
@@ -51,6 +52,7 @@ def ensure_story_state(raw_state: dict[str, Any] | None, current_location: str, 
     memory.setdefault("当前场景摘要", "")
     memory.setdefault("重要裁定记录", [])
     state["秘密"].setdefault("已屏蔽条目", [])
+    # 地点列表使用归一化名称去重，避免“岛上灯塔”和“灯塔”等重复显示。
     story["已访问地点"] = unique_locations(story.get("已访问地点", []))
     story["当前可前往地点"] = unique_locations(story.get("当前可前往地点", []))
     add_unique(story["已访问地点"], normalize_location_name(current_location))
@@ -71,6 +73,7 @@ def build_turn_delta(
     current_scene: str,
     location_context: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    # 本函数只构造“本回合发生了什么”，真正写入会话状态由 apply_turn_delta 完成。
     target = str(intent.get("target") or "").strip()
     action_type = str(intent.get("action_type") or "调查")
     time_cost = int(adjudication.get("time_cost_minutes") or 0)
@@ -114,6 +117,7 @@ def build_turn_delta(
 
 
 def extract_location_delta(generated_delta: dict[str, Any]) -> str:
+    # 兼容 LLM 可能输出的中英文字段名，尽量提取目标地点。
     candidates = [
         generated_delta.get("location"),
         generated_delta.get("current_location"),
@@ -140,6 +144,7 @@ def extract_location_delta(generated_delta: dict[str, Any]) -> str:
 
 
 def extract_scene_delta(generated_delta: dict[str, Any]) -> str:
+    # 场景比地点更细，用于描述当前房间、码头、走廊等具体处境。
     candidates = [
         generated_delta.get("scene"),
         generated_delta.get("current_scene"),
@@ -163,6 +168,7 @@ def extract_scene_delta(generated_delta: dict[str, Any]) -> str:
 
 
 def apply_turn_delta(story_state: dict[str, Any], delta: dict[str, Any], current_location: str, current_scene: str, current_time: str) -> dict[str, Any]:
+    # 将结构化增量合并到长期剧情状态，同时推进时间、危险等级和行动记忆。
     state = ensure_story_state(story_state, current_location, current_scene, current_time)
     story = state["剧情"]
     scene = state["场景"]
@@ -197,6 +203,7 @@ def apply_turn_delta(story_state: dict[str, Any], delta: dict[str, Any], current
 
 
 def infer_available_locations(player_input: str, generated_delta: dict[str, Any], location_context: list[dict[str, Any]] | None = None) -> list[str]:
+    # 可前往地点来自 LLM 增量、结构化实体检索和玩家输入中的明确地点。
     locations: list[str] = []
     append_locations(locations, generated_delta.get("available_locations"))
     story_updates = generated_delta.get("story_updates")
@@ -224,6 +231,7 @@ def append_locations(locations: list[str], value: Any) -> None:
 
 
 def location_from_context_row(row: dict[str, Any]) -> str:
+    # 只从玩家可见的地点实体中提取名称，避免把隐藏地点提前暴露。
     metadata = row.get("metadata") or {}
     if metadata.get("entity_type") != "地点":
         return ""
@@ -245,6 +253,7 @@ def unique_locations(locations: list[str]) -> list[str]:
 
 
 def normalize_location_name(value: Any) -> str:
+    # 过滤空值、集合对象和常见占位文本，保留可用于展示和去重的地点名。
     if value is None:
         return ""
     if isinstance(value, (dict, list, tuple, set)):
@@ -312,6 +321,7 @@ def build_flags(player_input: str, intent: dict[str, Any], skill_checks: list[di
 
 
 def infer_danger_delta(action_type: str, skill_checks: list[dict[str, Any]], sanity_checks: list[dict[str, Any]], adjudication: dict[str, Any]) -> int:
+    # 危险增量只会上升且单回合封顶，避免一次失败让难度跳变过大。
     delta = 0
     if action_type == "战斗":
         delta += 1
@@ -337,6 +347,7 @@ def summarize_action(player_input: str, target: str, skill_checks: list[dict[str
 
 
 def advance_time(value: str, minutes: int) -> str:
+    # 时间格式正确时按耗时推进；无法解析时保持原值，避免破坏已有存档。
     if minutes <= 0:
         return value
     try:

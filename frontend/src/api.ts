@@ -3,6 +3,7 @@ import type { ActionResponse, ActionStreamEvent, Character, GameSession } from '
 const apiBase = `${import.meta.env.BASE_URL.replace(/\/$/, '')}/api`;
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
+  // 普通 JSON 请求封装：统一补充请求头，并把后端错误转换成 Error。
   const response = await fetch(url, {
     headers: { 'Content-Type': 'application/json', ...(options?.headers ?? {}) },
     ...options
@@ -15,6 +16,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 function parseErrorMessage(detail: string, status: number): string {
+  // FastAPI 通常把业务错误放在 detail 字段；解析失败时保留原始响应文本。
   if (!detail) return `请求失败，状态码：${status}`;
   try {
     const payload = JSON.parse(detail) as { detail?: unknown };
@@ -26,6 +28,7 @@ function parseErrorMessage(detail: string, status: number): string {
 }
 
 export const api = {
+  // 页面层只调用这些语义化方法，不直接拼接后端路径。
   characters: () => request<Character[]>(`${apiBase}/characters`),
   sessions: () => request<GameSession[]>(`${apiBase}/sessions`),
   getSession: (sessionId: string) => request<GameSession>(`${apiBase}/sessions/${sessionId}`),
@@ -48,6 +51,7 @@ export const api = {
 };
 
 async function streamRequest(url: string, options: RequestInit, onEvent: (event: ActionStreamEvent) => void): Promise<void> {
+  // 流式接口使用 NDJSON：每收到一行 JSON 就立即通知页面更新叙事文本。
   const response = await fetch(url, {
     headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
     ...options
@@ -61,6 +65,7 @@ async function streamRequest(url: string, options: RequestInit, onEvent: (event:
   const decoder = new TextDecoder();
   let buffer = '';
   while (true) {
+    // buffer 保存半行数据，避免网络分片导致 JSON 被截断后解析失败。
     const { value, done } = await reader.read();
     buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
     const lines = buffer.split('\n');

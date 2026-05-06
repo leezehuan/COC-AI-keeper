@@ -22,6 +22,7 @@ _agent: KeeperAgent | None = None
 
 
 def get_agent() -> KeeperAgent:
+    # KeeperAgent 初始化较重，使用进程内单例复用 LangGraph、LLM 与检索服务。
     global _agent
     if _agent is None:
         _agent = KeeperAgent()
@@ -29,6 +30,7 @@ def get_agent() -> KeeperAgent:
 
 
 def ensure_current_character_attributes(db: Session) -> models.Scenario:
+    # 每次读取角色前同步默认剧本与预设角色属性，避免资料导入后前端拿到旧结构。
     scenario = ensure_default_scenario(db)
     ensure_character_attributes(db, scenario, resolve_project_path(get_settings().character_dir))
     return scenario
@@ -62,6 +64,7 @@ def create_session(payload: schemas.SessionCreate, db: Session = Depends(get_db)
     character = None
     if payload.character_id:
         character = db.get(models.Character, payload.character_id)
+    # 未指定角色时优先使用推荐的“调查局探员”，否则退回任意可用角色。
     if character is None:
         character = db.query(models.Character).filter(models.Character.scenario_id == scenario.id, models.Character.archetype == "调查局探员").one_or_none()
     if character is None:
@@ -69,6 +72,7 @@ def create_session(payload: schemas.SessionCreate, db: Session = Depends(get_db)
     if character is None:
         raise HTTPException(status_code=400, detail="没有可用角色。请先调用 /coc/api/import 导入资料。")
     session = models.GameSession(scenario_id=scenario.id, character_id=character.id, title=payload.title)
+    # 新会话立即初始化结构化剧情状态，后续回合只在此结构上增量推进。
     session.state = ensure_story_state({}, session.current_location, session.current_scene, session.current_time)
     db.add(session)
     db.flush()
@@ -80,6 +84,7 @@ def create_session(payload: schemas.SessionCreate, db: Session = Depends(get_db)
 @router.get("/sessions", response_model=list[schemas.SessionOut])
 def list_sessions(db: Session = Depends(get_db)) -> list[schemas.SessionOut]:
     ensure_current_character_attributes(db)
+    # 预加载前端展示所需关联对象，减少序列化时的额外数据库查询。
     sessions = (
         db.query(models.GameSession)
         .options(
@@ -109,6 +114,7 @@ def delete_session(session_id: str, db: Session = Depends(get_db)) -> dict[str, 
         raise HTTPException(status_code=404, detail="未找到指定会话")
     deleted_memory_chunks = 0
     try:
+        # 删除数据库会话时同步清理向量库中的会话记忆，避免旧记忆影响新游戏。
         deleted_memory_chunks = RetrievalService().delete_where("session_memory_chunks", {"session_id": session_id})
     except Exception:
         deleted_memory_chunks = 0
@@ -121,6 +127,7 @@ def delete_session(session_id: str, db: Session = Depends(get_db)) -> dict[str, 
 def submit_action(session_id: str, payload: schemas.PlayerActionIn, db: Session = Depends(get_db)) -> schemas.ActionResponse:
     if db.get(models.GameSession, session_id) is None:
         raise HTTPException(status_code=404, detail="未找到指定会话")
+    # 非流式接口直接等待守秘人完整回合执行完毕后返回。
     result = get_agent().run_turn(db, session_id, payload.message)
     return build_action_response(db, session_id, result)
 
@@ -135,6 +142,7 @@ def submit_action_stream(session_id: str, payload: schemas.PlayerActionIn, db: S
             yield encode_stream_event({"type": "start"})
             result = get_agent().run_turn(db, session_id, payload.message)
             response = build_action_response(db, session_id, result)
+            # 叙事文本按小块返回，前端可以模拟守秘人逐字讲述的效果。
             for chunk in split_stream_text(response.narration):
                 yield encode_stream_event({"type": "chunk", "content": chunk})
                 time.sleep(0.015)
@@ -146,6 +154,7 @@ def submit_action_stream(session_id: str, payload: schemas.PlayerActionIn, db: S
 
 
 def build_action_response(db: Session, session_id: str, result: dict) -> schemas.ActionResponse:
+    # Agent 的内部状态较大，这里只整理前端需要展示和持久化的公开字段。
     session_out = build_session_out(db, session_id)
     return schemas.ActionResponse(
         session=session_out,
@@ -161,10 +170,12 @@ def build_action_response(db: Session, session_id: str, result: dict) -> schemas
 
 
 def encode_stream_event(payload: dict) -> str:
+    # 使用 NDJSON：一行一个 JSON 事件，便于浏览器流式解析。
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
 def split_stream_text(text: str) -> Iterator[str]:
+    # 优先在中文标点处断句；长句则按固定长度切块，避免前端等待过久。
     buffer = ""
     for char in text:
         buffer += char
@@ -176,6 +187,7 @@ def split_stream_text(text: str) -> Iterator[str]:
 
 
 def build_session_out(db: Session, session_id: str) -> schemas.SessionOut:
+    # 会话输出是前端页面的聚合视图，包含角色、线索、物品和最近回合。
     session = (
         db.query(models.GameSession)
         .options(

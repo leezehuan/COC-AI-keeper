@@ -8,6 +8,7 @@ const guideStorageKey = 'coc-lite-new-user-guide-seen';
 const openingText = '现在是 1926 年四月十二日，晚上八点十五分左右。航标岛上的灯塔在暴风雨前熄灭，埃塞克斯号触礁沉没。你坐在救生艇里，黑暗的海面拍打船舷，远处只有灯塔底部透出微弱的光。';
 
 export default function App() {
+  // 主组件集中管理会话、聊天记录、角色选择、新手引导和右侧状态栏数据。
   const sessionPanelRef = useRef<HTMLDetailsElement>(null);
   const [characters, setCharacters] = useState<Character[]>([]);
   const [savedSessions, setSavedSessions] = useState<GameSession[]>([]);
@@ -24,11 +25,13 @@ export default function App() {
   const [showCharacterDialog, setShowCharacterDialog] = useState(false);
 
   useEffect(() => {
+    // 首次进入应用时加载角色和历史会话，为开始/恢复游戏做准备。
     void loadCharacters();
     void loadSessions();
   }, []);
 
   useEffect(() => {
+    // 新手引导只在首次访问自动弹出，用户关闭后用 localStorage 记住状态。
     try {
       if (window.localStorage.getItem(guideStorageKey) !== 'true') setShowGuide(true);
     } catch {
@@ -37,6 +40,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // 历史会话下拉菜单点击外部区域时自动关闭。
     function closeMenusOnOutsideClick(event: MouseEvent) {
       const target = event.target;
       if (!(target instanceof Node)) return;
@@ -71,12 +75,14 @@ export default function App() {
   }, [showCharacterDialog, busy]);
 
   const sortedSkills = useMemo<[string, number][]>(() => {
+    // 只展示数值最高的前十个技能，减少角色面板信息噪音。
     if (!session) return [];
     return (Object.entries(session.character.skills) as [string, number][])
       .sort((a, b) => b[1] - a[1])
       .slice(0, 10);
   }, [session]);
   const storyState = asRecord(session?.state['剧情']);
+  // 后端 state 是宽松 JSON，前端先归一化再提取可展示字段。
   const sceneState = asRecord(session?.state['场景']);
   const memoryState = asRecord(session?.state['记忆']);
   const visitedLocations = asStringArray(storyState['已访问地点']);
@@ -89,6 +95,7 @@ export default function App() {
   const auditEntries = formatAuditEntries(asRecord(session?.state['last_audit']));
   const recommendedCharacter = useMemo(() => characters.find((item) => item.archetype === '调查局探员') ?? null, [characters]);
   const characterOptions = useMemo(() => {
+    // 推荐角色排在首位，其余角色保持后端返回顺序。
     if (!recommendedCharacter) return characters;
     return [recommendedCharacter, ...characters.filter((item) => item.id !== recommendedCharacter.id)];
   }, [characters, recommendedCharacter]);
@@ -103,6 +110,7 @@ export default function App() {
   ];
 
   async function loadCharacters() {
+    // 角色列表也是资料是否已导入的信号：失败时提示用户先初始化后端数据。
     try {
       const list = await api.characters();
       setCharacters(list);
@@ -115,6 +123,7 @@ export default function App() {
   }
 
   async function loadSessions() {
+    // 历史会话只缓存概要；真正恢复时再按 id 拉取完整会话。
     try {
       const list = await api.sessions();
       setSavedSessions(list);
@@ -127,6 +136,7 @@ export default function App() {
   }
 
   function openCharacterDialog() {
+    // 开始新会话前先让用户确认角色，默认选中推荐角色。
     if (busy || !characters.length) return;
     const selectedExists = characters.some((item) => item.id === selectedCharacter);
     const defaultCharacter = recommendedCharacter ?? characters[0];
@@ -136,6 +146,7 @@ export default function App() {
   }
 
   async function startSession(characterId = selectedCharacter) {
+    // 创建成功后重置聊天窗口，让新会话从固定开场白开始。
     const characterToUse = characterId || recommendedCharacter?.id || characters[0]?.id;
     if (!characterToUse) return;
     setBusy(true);
@@ -162,6 +173,7 @@ export default function App() {
   }
 
   async function resumeSessionById(sessionId: string) {
+    // 恢复会话时根据最近回合重建聊天消息，并复用上次可选行动。
     if (!sessionId || busy) return;
     setBusy(true);
     setError('');
@@ -182,6 +194,7 @@ export default function App() {
   }
 
   async function deleteSavedSession(sessionId: string) {
+    // 删除当前正在查看的会话时，同时把页面回到未开始状态。
     if (!sessionId || busy) return;
     setBusy(true);
     setError('');
@@ -210,6 +223,7 @@ export default function App() {
   }
 
   function closeGuide() {
+    // localStorage 可能因隐私模式不可用，因此失败时只关闭弹窗不阻断页面。
     setShowGuide(false);
     try {
       window.localStorage.setItem(guideStorageKey, 'true');
@@ -219,6 +233,7 @@ export default function App() {
   }
 
   async function send(message: string) {
+    // 发送玩家行动后先追加一个空守秘人消息，流式 chunk 会持续写入这条消息。
     const content = message.trim();
     if (!content || !session || busy) return;
     setBusy(true);
@@ -245,6 +260,7 @@ export default function App() {
   }
 
   function appendToLastKeeperMessage(chunk: string) {
+    // 保持 React 状态不可变更新，只替换最后一条守秘人消息。
     setMessages((prev) => {
       const next = [...prev];
       const index = next.length - 1;
@@ -256,6 +272,7 @@ export default function App() {
   }
 
   function applyActionResponse(response: ActionResponse) {
+    // final 事件带有完整回合结果，用它覆盖流式文本并刷新状态栏数据。
     setSession(response.session);
     setOptions(normalizeOptions(response.options));
     const meta = buildActionMeta(response);
@@ -579,6 +596,7 @@ function InventoryList({ items }: { items: InventoryItem[] }) {
 }
 
 function buildMessagesFromSession(session: GameSession): ChatMessage[] {
+  // 后端只返回最近回合，因此恢复界面展示的是近期上下文而非完整历史。
   if (!session.recent_turns.length) return [{ role: 'keeper', content: openingText }];
   const messages: ChatMessage[] = [];
   session.recent_turns.forEach((turn) => {
@@ -597,6 +615,7 @@ function buildInventoryMeta(metadata: Record<string, unknown>): string {
 }
 
 function buildActionMeta(response: ActionResponse): string {
+  // 把检定、理智、线索、耗时和物品变化压缩成消息下方的一行摘要。
   const metaParts: string[] = [];
   response.skill_checks.forEach((check) => metaParts.push(`${check.skill} ${check.roll}/${check.skill_value}，${check.success_level}`));
   response.sanity_checks.forEach((check) => metaParts.push(`理智损失 ${check.san_loss}，当前 ${check.san_after}`));
@@ -608,6 +627,7 @@ function buildActionMeta(response: ActionResponse): string {
 }
 
 function formatInventoryChangeSummary(delta: Record<string, unknown>): string[] {
+  // 优先使用后端已执行的物品结果摘要；没有结果时再展示 LLM 建议的变更。
   const results = asRecord(delta['inventory_results']);
   const summary = results['summary'];
   if (Array.isArray(summary)) return summary.map(String).filter(Boolean);
@@ -631,6 +651,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 function asStringArray(value: unknown): string[] {
+  // state 中的列表可能混入空值或重复地点，这里统一清洗为展示文本。
   if (!Array.isArray(value)) return [];
   const result: string[] = [];
   const seen = new Set<string>();
@@ -660,6 +681,7 @@ interface AttributeRow {
 }
 
 function buildAttributeRows(attributes: unknown): AttributeRow[] {
+  // 兼容角色卡中的“核心属性”嵌套结构，计算简单/中等/困难鉴定值。
   const record = asRecord(attributes);
   const core = asRecord(record['核心属性']);
   const order: [string, string][] = [
@@ -693,6 +715,7 @@ function formatDateTime(value: string): string {
 }
 
 function normalizeOptions(value: unknown): string[] {
+  // 后端选项可能是字符串或对象；前端统一转成去重后的按钮文本。
   if (!Array.isArray(value)) return ['继续调查', '查看角色状态', '自定义行动'];
   const options: string[] = [];
   value.forEach((item) => {
@@ -726,6 +749,7 @@ function formatFlagEntries(value: unknown): string[] {
 }
 
 function formatAuditEntries(value: Record<string, unknown>): string[] {
+  // 调试面板仅展示审计摘要，不直接暴露完整内部状态对象。
   const validation = asRecord(value['状态校验']);
   const leak = asRecord(value['防剧透']);
   const divergence = asRecord(value['偏离剧情']);
