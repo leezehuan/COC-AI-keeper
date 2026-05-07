@@ -24,8 +24,18 @@ from app.services.summary import apply_summary_to_session, build_summary_memory_
 from app.utils import safe_key
 
 
+# 【阅读顺序 5：LangGraph 守秘人核心】
+# 如果你是 LangGraph 初学者，建议按下面顺序阅读：
+# 1. KeeperState：理解“图里的共享状态字典”。
+# 2. KeeperAgent._build_graph：理解节点如何串成流程图。
+# 3. run_turn：理解 API 如何启动一次图执行。
+# 4. load_state -> parse_intent -> retrieve_context -> adjudicate -> roll_tools -> resolve_action。
+# 5. generate_response -> generate_state_delta -> validate_state_delta_node -> secret_leak_check。
+# 6. generate_next_options -> commit_state：理解最终如何落库并返回给前端。
+# LangGraph 的核心思想：每个节点都是一个函数，输入 state，补充/修改 state，再交给下一个节点。
 class KeeperState(TypedDict, total=False):
     # LangGraph 在各节点之间传递的共享状态，包含数据库对象、检索上下文和本回合产物。
+    # 对初学者来说，可以把它看成“本回合的工作台”：每个节点都把自己的结果放到这里。
     db: Session
     session_id: str
     player_input: str
@@ -58,17 +68,22 @@ class KeeperState(TypedDict, total=False):
 
 class KeeperAgent:
     def __init__(self) -> None:
+        # LLMClient 负责调用大模型；RetrievalService 负责向量检索；graph 是 LangGraph 编译后的执行图。
         self.llm = LLMClient()
         self.retrieval = RetrievalService()
         self.graph = self._build_graph()
 
     def run_turn(self, db: Session, session_id: str, player_input: str) -> KeeperState:
         # 每次玩家输入都会启动一次完整守秘人回合，并返回最终状态供 API 序列化。
+        # 【LangGraph 启动点】API 层只需要传入数据库会话、游戏会话 id 和玩家输入，剩余步骤由图自动执行。
         initial: KeeperState = {"db": db, "session_id": session_id, "player_input": player_input}
         return self.graph.invoke(initial)
 
     def _build_graph(self):
         # 回合流程：载入状态 -> 理解意图 -> 检索资料 -> 规则裁定 -> 生成叙事 -> 校验并落库。
+        # 【LangGraph 结构说明】StateGraph(KeeperState) 表示这张图的每个节点都共享 KeeperState。
+        # add_node 注册“节点名称 -> Python 函数”；add_edge 定义节点之间的执行顺序。
+        # add_conditional_edges 是条件分支：这里根据意图是否清晰，决定追问玩家还是继续裁定。
         graph = StateGraph(KeeperState)
         graph.add_node("load_state", self.load_state)
         graph.add_node("parse_intent", self.parse_intent)
@@ -101,6 +116,7 @@ class KeeperAgent:
 
     def load_state(self, state: KeeperState) -> KeeperState:
         # 先加载会话及其关联数据，保证后续节点不触发额外懒加载或拿到不完整上下文。
+        # 【LangGraph 节点 1】读取数据库，把 GameSession、Character、线索、物品等放进 state。
         db = state["db"]
         session = (
             db.query(models.GameSession)
@@ -121,6 +137,7 @@ class KeeperAgent:
 
     def parse_intent(self, state: KeeperState) -> KeeperState:
         # LLM 解析失败时使用启发式结果兜底，确保流程始终能继续或提出澄清。
+        # 【LangGraph 节点 2】把“我检查灯塔门口”这类自然语言，转成 action_type/target/skill 等结构化字段。
         session = state["session"]
         message = state["player_input"]
         fallback = heuristic_intent(message)
@@ -132,9 +149,11 @@ class KeeperAgent:
         return state
 
     def route_after_intent(self, state: KeeperState) -> str:
+        # 【LangGraph 条件分支】返回值必须匹配 _build_graph 里的映射键：clarify 或 continue。
         return "clarify" if state.get("needs_clarification") else "continue"
 
     def clarify_action(self, state: KeeperState) -> KeeperState:
+        # 【LangGraph 节点 3A】如果玩家输入太模糊，不推进剧情，只返回一个澄清问题。
         question = state["intent"].get("clarification_question") or "你想具体调查哪里，或以什么方式行动？"
         state["narration"] = str(question)
         state["options"] = ["检查附近明显可疑之处", "询问同伴的看法", "观察环境", "自定义行动"]
@@ -144,6 +163,8 @@ class KeeperAgent:
 
     def retrieve_context(self, state: KeeperState) -> KeeperState:
         # 用玩家输入、当前位置和意图拼接检索查询，同时拉取剧本、实体、线索、记忆与规则。
+        # 【LangGraph 节点 3B】这是 RAG 检索步骤：从向量库找“本回合可能用得上的剧本资料和规则资料”。
+        # 初学者注意：检索失败不会让整个回合崩溃，而是写入空列表或错误提示，让后续节点继续执行。
         session = state["session"]
         intent = state["intent"]
         query = " ".join([session.current_location, session.current_scene, state["player_input"], str(intent.get("target", "")), str(intent.get("skill", ""))])
@@ -171,6 +192,7 @@ class KeeperAgent:
 
     def adjudicate(self, state: KeeperState) -> KeeperState:
         # 根据角色技能、场景上下文和推断技能决定本轮是否需要检定及其难度。
+        # 【LangGraph 节点 4】规则裁定：决定是否要掷骰、用什么技能、难度和风险是多少。
         intent = state["intent"]
         character = state["character"]
         skill_name = normalize_skill(intent.get("skill") or infer_skill(state["player_input"]))
@@ -188,6 +210,7 @@ class KeeperAgent:
 
     def roll_tools(self, state: KeeperState) -> KeeperState:
         # 规则工具统一处理掷骰、技能检定和理智检定，避免 LLM 自行编造结果。
+        # 【LangGraph 节点 5】真正的随机结果在工具里生成，LLM 后面只能根据这个结果写叙事。
         results = execute_rule_tools(state["adjudication"], state["character"].san_current)
         state["dice_results"] = results["dice_results"]
         state["skill_checks"] = results["skill_checks"]
@@ -196,6 +219,7 @@ class KeeperAgent:
 
     def resolve_action(self, state: KeeperState) -> KeeperState:
         # 将规则结果和偏离剧情判断整理成 LLM 可引用的“裁定摘要”。
+        # 【LangGraph 节点 6】把掷骰结果、理智结果、偏离剧情程度合并成一段机器可读的结果说明。
         divergence = classify_divergence(state["player_input"], state.get("story_state", {}))
         state["divergence"] = divergence
         state["resolution"] = {
@@ -208,6 +232,7 @@ class KeeperAgent:
 
     def generate_response(self, state: KeeperState) -> KeeperState:
         # 只把玩家可见信息送入回应提示词，隐藏线索和主持人秘密会在后续再次过滤。
+        # 【LangGraph 节点 7】调用 LLM 生成守秘人叙事和下一步选项；这里仍不会直接落库。
         if state.get("needs_clarification"):
             question = state["intent"].get("clarification_question") or "你想具体调查哪里，或以什么方式行动？"
             state["narration"] = question
@@ -253,6 +278,7 @@ class KeeperAgent:
 
     def generate_state_delta(self, state: KeeperState) -> KeeperState:
         # 把 LLM 给出的自由格式 state_delta 收敛为项目内部稳定的结构化增量。
+        # 【LangGraph 节点 8】把“本回合造成的变化”整理成统一结构，例如地点变化、耗时、危险变化、新线索。
         payload = state.get("generated_payload", {})
         fallback = fallback_response(state)
         generated_delta = payload.get("state_delta") if isinstance(payload.get("state_delta"), dict) else fallback["state_delta"]
@@ -278,6 +304,7 @@ class KeeperAgent:
 
     def validate_state_delta_node(self, state: KeeperState) -> KeeperState:
         # 校验并修正状态增量，防止非法地点、危险值或剧情字段污染会话状态。
+        # 【LangGraph 节点 9】不要完全信任 LLM 输出；状态写入数据库前必须经过规则校验。
         validated_delta, report = validate_state_delta(state.get("state_delta", {}), state.get("story_state", {}))
         state["state_delta"] = validated_delta
         state["validation_report"] = report
@@ -285,6 +312,7 @@ class KeeperAgent:
 
     def secret_leak_check(self, state: KeeperState) -> KeeperState:
         # 最后一道玩家可见文本防线：屏蔽尚未发现的线索和可能剧透的选项。
+        # 【LangGraph 节点 10】玩家能看到的文字在这里做防剧透过滤，避免直接暴露主持人秘密。
         known_clues = [clue.name for clue in state["session"].clues] + state.get("state_delta", {}).get("generated_clues", [])
         safe_text, text_report = sanitize_player_output(state.get("narration", ""), known_clues)
         safe_options, option_report = sanitize_options(state.get("options", []), known_clues)
@@ -295,6 +323,7 @@ class KeeperAgent:
 
     def generate_next_options(self, state: KeeperState) -> KeeperState:
         # 在 LLM 选项基础上追加引导项，并保证最终始终保留“自定义行动”。
+        # 【LangGraph 节点 11】整理前端按钮选项；如果玩家卡住太久，会追加线索回顾提示。
         options = ensure_options(state.get("options", []))
         if state.get("divergence", {}).get("needs_guidance"):
             options = ["寻找现实可行的调查方向", *options]
@@ -306,6 +335,8 @@ class KeeperAgent:
 
     def commit_state(self, state: KeeperState) -> KeeperState:
         # 统一提交本回合副作用：角色状态、剧情状态、线索、物品、日志和向量记忆。
+        # 【LangGraph 节点 12】这是唯一集中落库的节点，前面节点主要是在 state 中准备数据。
+        # 初学者可重点区分：state 是“本次运行中的临时数据”，db.commit 后才变成数据库里的长期状态。
         db = state["db"]
         session = state["session"]
         character = state["character"]

@@ -2,6 +2,12 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import type { ActionResponse, Character, ChatMessage, GameSession, InventoryItem } from './types';
 
+// 【阅读顺序 1：前端主界面】
+// 如果你是 Web 初学者，建议先从这个文件看起：
+// 1. 用户在页面上点击按钮或输入行动。
+// 2. React 用 useState 保存“当前会话、聊天消息、输入框、加载状态”等页面状态。
+// 3. 用户提交行动后调用 frontend/src/api.ts，把请求发给后端。
+// 4. 后端返回守秘人叙事、选项、线索和状态后，本文件再把这些数据渲染到页面上。
 const assetBase = `${import.meta.env.BASE_URL.replace(/\/$/, '')}/assets`;
 const guideStorageKey = 'coc-lite-new-user-guide-seen';
 
@@ -9,6 +15,7 @@ const openingText = '现在是 1926 年四月十二日，晚上八点十五分�
 
 export default function App() {
   // 主组件集中管理会话、聊天记录、角色选择、新手引导和右侧状态栏数据。
+  // 对初学者来说，可以把 App 先理解成“页面总控制器”：所有按钮事件和展示数据最终都汇总到这里。
   const sessionPanelRef = useRef<HTMLDetailsElement>(null);
   const [characters, setCharacters] = useState<Character[]>([]);
   const [savedSessions, setSavedSessions] = useState<GameSession[]>([]);
@@ -111,6 +118,7 @@ export default function App() {
 
   async function loadCharacters() {
     // 角色列表也是资料是否已导入的信号：失败时提示用户先初始化后端数据。
+    // 【Web 流程 1】页面加载后先向后端请求角色列表，成功后才能开始新会话。
     try {
       const list = await api.characters();
       setCharacters(list);
@@ -124,6 +132,7 @@ export default function App() {
 
   async function loadSessions() {
     // 历史会话只缓存概要；真正恢复时再按 id 拉取完整会话。
+    // 【Web 流程 2】历史会话列表用于“继续游戏”，这里不会运行 Agent，只读取数据库中的会话摘要。
     try {
       const list = await api.sessions();
       setSavedSessions(list);
@@ -147,6 +156,7 @@ export default function App() {
 
   async function startSession(characterId = selectedCharacter) {
     // 创建成功后重置聊天窗口，让新会话从固定开场白开始。
+    // 【Web 流程 3】开始会话会调用 POST /sessions，后端会创建 GameSession 并初始化剧情状态。
     const characterToUse = characterId || recommendedCharacter?.id || characters[0]?.id;
     if (!characterToUse) return;
     setBusy(true);
@@ -174,6 +184,7 @@ export default function App() {
 
   async function resumeSessionById(sessionId: string) {
     // 恢复会话时根据最近回合重建聊天消息，并复用上次可选行动。
+    // 【Web 流程 4】恢复会话只读取后端保存过的状态，不会重新执行上一回合的 LangGraph。
     if (!sessionId || busy) return;
     setBusy(true);
     setError('');
@@ -234,6 +245,8 @@ export default function App() {
 
   async function send(message: string) {
     // 发送玩家行动后先追加一个空守秘人消息，流式 chunk 会持续写入这条消息。
+    // 【Web 流程 5】这是玩家行动的入口：输入文本 -> api.streamAction -> 后端 Agent -> 流式返回叙事。
+    // 初学者可重点观察 messages 的变化：先追加玩家消息，再追加空的守秘人消息，最后不断填充守秘人文本。
     const content = message.trim();
     if (!content || !session || busy) return;
     setBusy(true);
@@ -242,6 +255,7 @@ export default function App() {
     setMessages((prev) => [...prev, { role: 'player', content }, { role: 'keeper', content: '' }]);
     try {
       await api.streamAction(session.id, content, (event) => {
+        // 【Web 流程 6】后端流式返回三类事件：chunk 是一段文本，final 是完整结果，error 是异常。
         if (event.type === 'chunk') {
           appendToLastKeeperMessage(event.content);
         } else if (event.type === 'final') {
@@ -273,6 +287,7 @@ export default function App() {
 
   function applyActionResponse(response: ActionResponse) {
     // final 事件带有完整回合结果，用它覆盖流式文本并刷新状态栏数据。
+    // 【Web 流程 7】final 到达后，页面才更新会话状态、下一步选项、线索、物品栏和检定摘要。
     setSession(response.session);
     setOptions(normalizeOptions(response.options));
     const meta = buildActionMeta(response);
@@ -597,6 +612,7 @@ function InventoryList({ items }: { items: InventoryItem[] }) {
 
 function buildMessagesFromSession(session: GameSession): ChatMessage[] {
   // 后端只返回最近回合，因此恢复界面展示的是近期上下文而非完整历史。
+  // 初学者可以把 recent_turns 理解成“服务器保存的聊天记录切片”，这里把它重新拼成前端消息数组。
   if (!session.recent_turns.length) return [{ role: 'keeper', content: openingText }];
   const messages: ChatMessage[] = [];
   session.recent_turns.forEach((turn) => {
@@ -716,6 +732,7 @@ function formatDateTime(value: string): string {
 
 function normalizeOptions(value: unknown): string[] {
   // 后端选项可能是字符串或对象；前端统一转成去重后的按钮文本。
+  // 这样即使 LLM 偶尔返回了对象格式，页面按钮也能尽量正常显示。
   if (!Array.isArray(value)) return ['继续调查', '查看角色状态', '自定义行动'];
   const options: string[] = [];
   value.forEach((item) => {

@@ -9,6 +9,12 @@ from app.api import router
 from app.config import get_settings
 from app.utils import resolve_project_path
 
+# 【阅读顺序 3：后端 Web 应用入口】
+# Web 初学者可以把这个文件理解成“FastAPI 服务器的启动配置”：
+# 1. 创建 FastAPI app。
+# 2. 注册全局异常处理，让数据库/模型错误变成前端可读的 JSON。
+# 3. 配置 CORS，让浏览器前端可以请求后端。
+# 4. 挂载静态资源和业务路由，真正的接口逻辑在 backend/app/api.py。
 settings = get_settings()
 app = FastAPI(title=settings.app_name)
 

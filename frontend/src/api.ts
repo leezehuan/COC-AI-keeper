@@ -1,9 +1,15 @@
 import type { ActionResponse, ActionStreamEvent, Character, GameSession } from './types';
 
+// 【阅读顺序 2：前端 API 封装】
+// 这个文件是浏览器和后端之间的“翻译层”：
+// 1. App.tsx 不直接写 fetch URL，而是调用这里的 api.characters / api.streamAction 等方法。
+// 2. 这里统一拼接 /api 路径、设置 JSON 请求头、解析错误。
+// 3. 对流式接口，streamRequest 会一行一行读取后端返回的 NDJSON 事件。
 const apiBase = `${import.meta.env.BASE_URL.replace(/\/$/, '')}/api`;
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   // 普通 JSON 请求封装：统一补充请求头，并把后端错误转换成 Error。
+  // T 是 TypeScript 泛型，用来告诉调用方“这次请求成功后会返回什么类型的数据”。
   const response = await fetch(url, {
     headers: { 'Content-Type': 'application/json', ...(options?.headers ?? {}) },
     ...options
@@ -52,6 +58,7 @@ export const api = {
 
 async function streamRequest(url: string, options: RequestInit, onEvent: (event: ActionStreamEvent) => void): Promise<void> {
   // 流式接口使用 NDJSON：每收到一行 JSON 就立即通知页面更新叙事文本。
+  // 对 Web 初学者来说，可以把它理解为“边下载边解析”，不用等整段守秘人回复全部生成完。
   const response = await fetch(url, {
     headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
     ...options

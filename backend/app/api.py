@@ -17,12 +17,19 @@ from app.services.retrieval import RetrievalService
 from app.services.story_state import ensure_story_state
 from app.utils import resolve_project_path
 
+# 【阅读顺序 4：后端 HTTP API】
+# 这个文件是“Web 请求”和“游戏业务”的连接层：
+# 1. 前端请求 /coc/api/characters、/sessions、/actions/stream。
+# 2. FastAPI 根据下面的 @router.get / @router.post 找到对应函数。
+# 3. 普通接口直接返回 JSON；流式接口用 StreamingResponse 持续返回 NDJSON。
+# 4. 真正的守秘人推理在 KeeperAgent.run_turn，也就是 backend/app/services/agent.py。
 router = APIRouter(prefix="/api")
 _agent: KeeperAgent | None = None
 
 
 def get_agent() -> KeeperAgent:
     # KeeperAgent 初始化较重，使用进程内单例复用 LangGraph、LLM 与检索服务。
+    # 初学者注意：这里不是每次请求都 new 一个 Agent，否则会重复构建图和客户端，浪费资源。
     global _agent
     if _agent is None:
         _agent = KeeperAgent()
@@ -60,6 +67,7 @@ def list_characters(db: Session = Depends(get_db)) -> list[models.Character]:
 
 @router.post("/sessions", response_model=schemas.SessionOut)
 def create_session(payload: schemas.SessionCreate, db: Session = Depends(get_db)) -> schemas.SessionOut:
+    # 【Web 流程 8】创建会话：前端选择角色后调用这里，后端创建 GameSession 并返回页面需要的会话视图。
     scenario = ensure_current_character_attributes(db)
     character = None
     if payload.character_id:
@@ -125,6 +133,7 @@ def delete_session(session_id: str, db: Session = Depends(get_db)) -> dict[str, 
 
 @router.post("/sessions/{session_id}/actions", response_model=schemas.ActionResponse)
 def submit_action(session_id: str, payload: schemas.PlayerActionIn, db: Session = Depends(get_db)) -> schemas.ActionResponse:
+    # 【Web 流程 9】非流式行动接口：适合调试或脚本调用；页面主要使用下面的 stream 版本。
     if db.get(models.GameSession, session_id) is None:
         raise HTTPException(status_code=404, detail="未找到指定会话")
     # 非流式接口直接等待守秘人完整回合执行完毕后返回。
@@ -134,10 +143,12 @@ def submit_action(session_id: str, payload: schemas.PlayerActionIn, db: Session 
 
 @router.post("/sessions/{session_id}/actions/stream")
 def submit_action_stream(session_id: str, payload: schemas.PlayerActionIn, db: Session = Depends(get_db)) -> StreamingResponse:
+    # 【Web 流程 10】流式行动接口：玩家输入会在这里进入 KeeperAgent，也就是 LangGraph 回合链路。
     if db.get(models.GameSession, session_id) is None:
         raise HTTPException(status_code=404, detail="未找到指定会话")
 
     def event_stream() -> Iterator[str]:
+        # 这个内部生成器会不断 yield 字符串；FastAPI 每 yield 一次，浏览器就可能收到一小段数据。
         try:
             yield encode_stream_event({"type": "start"})
             result = get_agent().run_turn(db, session_id, payload.message)

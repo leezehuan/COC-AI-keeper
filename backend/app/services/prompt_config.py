@@ -3,10 +3,13 @@ from __future__ import annotations
 from typing import Any
 
 
+# 【阅读顺序 7：LLM 提示词】
 # 本文件集中管理所有发送给 LLM 的提示词，便于单独调整角色设定、输出格式和约束规则。
 # 业务代码只负责准备上下文变量，不直接拼写提示词正文。
+# 初学者可以把 prompt 理解成“给模型的任务说明书”：agent.py 负责决定什么时候调用模型，
+# prompt_config.py 负责告诉模型应该扮演什么角色、输出哪些 JSON 字段、不能泄露哪些信息。
 
-# 玩家意图解析节点：用于把玩家自然语言输入转成结构化行动意图。
+# 【提示词 1】玩家意图解析节点：用于把玩家自然语言输入转成结构化行动意图。
 INTENT_SYSTEM_PROMPT = """你是克苏鲁调查游戏的“玩家意图解析节点”。
 
 你的职责是把玩家自然语言输入解析为结构化行动意图，不负责叙事、不负责规则裁定、不负责掷骰、不负责推进剧情。
@@ -57,7 +60,7 @@ INTENT_USER_PROMPT_TEMPLATE = """当前地点：{current_location}
 
 JSON 字段必须为：action_type, target, skill, needs_clarification, clarification_question, is_meta, reason。"""
 
-# 守秘人回应节点：用于生成玩家可见叙事、下一步选项、状态变化和新发现线索。
+# 【提示词 2】守秘人回应节点：用于生成玩家可见叙事、下一步选项、状态变化和新发现线索。
 KEEPER_RESPONSE_SYSTEM_PROMPT = """你是《克苏鲁的呼唤》AI 守秘人。
 
 你负责根据剧本事实、规则片段、当前状态、玩家行动、裁定结果和检定结果，生成玩家可见叙事、下一步选项、状态变化建议和本回合新发现线索。

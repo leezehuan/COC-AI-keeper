@@ -6,12 +6,20 @@ from typing import Any
 
 from app.utils import safe_key
 
+# 【阅读顺序 6：剧情状态结构】
+# 这个文件负责把 LangGraph 每回合产生的 state_delta 写入长期 story_state。
+# 初学者可以这样理解：
+# 1. agent.py 负责“本回合怎么判断、怎么叙事”。
+# 2. story_state.py 负责“本回合结束后，游戏世界状态应该怎么变”。
+# 3. ensure_story_state 保证存档结构完整，build_turn_delta 构造变化，apply_turn_delta 真正合并变化。
+
 
 STATE_VERSION = 1
 
 
 def ensure_story_state(raw_state: dict[str, Any] | None, current_location: str, current_scene: str, current_time: str) -> dict[str, Any]:
     # 将旧会话或空会话状态补齐为统一结构，后续状态更新都依赖这些固定分区。
+    # 【状态流程 1】每次读写剧情状态前都先调用它，确保“剧情/场景/记忆/秘密”四个分区存在。
     state = deepcopy(raw_state or {})
     state.setdefault("版本", STATE_VERSION)
     state.setdefault("剧情", {})
@@ -74,6 +82,7 @@ def build_turn_delta(
     location_context: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     # 本函数只构造“本回合发生了什么”，真正写入会话状态由 apply_turn_delta 完成。
+    # 【状态流程 2】这里把 Agent 和 LLM 的输出整理成标准 delta，避免后面到处解析自由格式文本。
     target = str(intent.get("target") or "").strip()
     action_type = str(intent.get("action_type") or "调查")
     time_cost = int(adjudication.get("time_cost_minutes") or 0)
@@ -169,6 +178,7 @@ def extract_scene_delta(generated_delta: dict[str, Any]) -> str:
 
 def apply_turn_delta(story_state: dict[str, Any], delta: dict[str, Any], current_location: str, current_scene: str, current_time: str) -> dict[str, Any]:
     # 将结构化增量合并到长期剧情状态，同时推进时间、危险等级和行动记忆。
+    # 【状态流程 3】这里才真正修改长期 story_state；修改后的结果会在 agent.py 的 commit_state 中落库。
     state = ensure_story_state(story_state, current_location, current_scene, current_time)
     story = state["剧情"]
     scene = state["场景"]
