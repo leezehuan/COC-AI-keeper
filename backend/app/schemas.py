@@ -140,6 +140,33 @@ class ActionResponse(BaseModel):
     needs_clarification: bool = False
 
 
+class AssistantChatRequest(BaseModel):
+    session_id: str | None = None
+    message: str = Field(min_length=1, max_length=4000)
+    mode: str = "auto"
+    enable_mqe: bool = True
+    mqe_expansions: int = Field(default=2, ge=0, le=3)
+    enable_hyde: bool | None = None
+    top_k: int = Field(default=5, ge=1, le=12)
+    candidate_pool_multiplier: int = Field(default=4, ge=1, le=8)
+
+
+class AssistantCitationOut(BaseModel):
+    id: str = ""
+    title: str = ""
+    source_type: str = ""
+    citation: str = ""
+    snippet: str = ""
+
+
+class AssistantChatResponse(BaseModel):
+    answer: str
+    citations: list[AssistantCitationOut] = Field(default_factory=list)
+    retrieval_debug: dict[str, Any] = Field(default_factory=dict)
+    spoiler_blocked: bool = False
+    mode: str = "auto"
+
+
 class ImportRequest(BaseModel):
     reset_chroma: bool = False
     import_characters: bool = True

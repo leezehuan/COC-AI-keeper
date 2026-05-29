@@ -77,6 +77,15 @@ def build_entity_chunk(path: Path, section: MarkdownSection, entity_type: str, s
             "collection_type": "scenario_entity",
             "entity_type": entity_type,
             "secret_level": secret_level,
+            "rag_namespace": "scenario",
+            "source_type": "scenario_secret" if secret_level == "主持人秘密" else "scenario_public",
+            "visibility": "keeper_only" if secret_level == "主持人秘密" else "player_visible",
+            "chapter": section.title,
+            "chunk_index": section.index,
+            "memory_type": "rag_chunk",
+            "is_rag_data": True,
+            "data_source": "rag_pipeline",
+            "citation": f"{path.stem} · {section.title}",
         },
     )
 
@@ -97,6 +106,15 @@ def build_clue_chunk(path: Path, section: MarkdownSection, secret_level: str) ->
             "source_location": section.title,
             "secret_level": secret_level,
             "is_key_clue": key_clue,
+            "rag_namespace": "scenario",
+            "source_type": "scenario_secret" if secret_level == "主持人秘密" else "clue",
+            "visibility": "keeper_only" if secret_level == "主持人秘密" else "player_visible",
+            "chapter": section.title,
+            "chunk_index": section.index,
+            "memory_type": "clue_summary",
+            "is_rag_data": True,
+            "data_source": "rag_pipeline",
+            "citation": f"{path.stem} · {section.title}",
         },
     )
 

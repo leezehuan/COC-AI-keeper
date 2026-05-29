@@ -1,4 +1,4 @@
-import type { ActionResponse, ActionStreamEvent, Character, GameSession } from './types';
+import type { ActionResponse, ActionStreamEvent, AssistantChatResponse, AssistantMode, AssistantStreamEvent, Character, GameSession } from './types';
 
 // 【阅读顺序 2：前端 API 封装】
 // 这个文件是浏览器和后端之间的“翻译层”：
@@ -53,10 +53,31 @@ export const api = {
     streamRequest(`${apiBase}/sessions/${sessionId}/actions/stream`, {
       method: 'POST',
       body: JSON.stringify({ message })
+    }, onEvent),
+  assistantChat: (payload: AssistantChatPayload) =>
+    request<AssistantChatResponse>(`${apiBase}/assistant/chat`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
+  streamAssistantChat: (payload: AssistantChatPayload, onEvent: (event: AssistantStreamEvent) => void) =>
+    streamRequest(`${apiBase}/assistant/chat/stream`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
     }, onEvent)
 };
 
-async function streamRequest(url: string, options: RequestInit, onEvent: (event: ActionStreamEvent) => void): Promise<void> {
+export interface AssistantChatPayload {
+  session_id?: string | null;
+  message: string;
+  mode?: AssistantMode;
+  enable_mqe?: boolean;
+  mqe_expansions?: number;
+  enable_hyde?: boolean | null;
+  top_k?: number;
+  candidate_pool_multiplier?: number;
+}
+
+async function streamRequest<TEvent>(url: string, options: RequestInit, onEvent: (event: TEvent) => void): Promise<void> {
   // 流式接口使用 NDJSON：每收到一行 JSON 就立即通知页面更新叙事文本。
   // 对 Web 初学者来说，可以把它理解为“边下载边解析”，不用等整段守秘人回复全部生成完。
   const response = await fetch(url, {
@@ -80,10 +101,10 @@ async function streamRequest(url: string, options: RequestInit, onEvent: (event:
     for (const line of lines) {
       const text = line.trim();
       if (!text) continue;
-      onEvent(JSON.parse(text) as ActionStreamEvent);
+      onEvent(JSON.parse(text) as TEvent);
     }
     if (done) break;
   }
   const remaining = buffer.trim();
-  if (remaining) onEvent(JSON.parse(remaining) as ActionStreamEvent);
+  if (remaining) onEvent(JSON.parse(remaining) as TEvent);
 }

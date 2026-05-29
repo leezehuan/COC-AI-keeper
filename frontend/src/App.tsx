@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
 import { api } from './api';
-import type { ActionResponse, Character, ChatMessage, GameSession, InventoryItem } from './types';
+import type { ActionResponse, AssistantCitation, AssistantMessage, AssistantMode, Character, ChatMessage, DebugEvent, GameSession, InventoryItem } from './types';
 
 // 【阅读顺序 1：前端主界面】
 // 如果你是 Web 初学者，建议先从这个文件看起：
@@ -10,6 +11,8 @@ import type { ActionResponse, Character, ChatMessage, GameSession, InventoryItem
 // 4. 后端返回守秘人叙事、选项、线索和状态后，本文件再把这些数据渲染到页面上。
 const assetBase = `${import.meta.env.BASE_URL.replace(/\/$/, '')}/assets`;
 const guideStorageKey = 'coc-lite-new-user-guide-seen';
+const assistantOpenStorageKey = 'coc-lite-game-assistant-open';
+const maxDebugEvents = 200;
 
 const openingText = '现在是 1926 年四月十二日，晚上八点十五分左右。航标岛上的灯塔在暴风雨前熄灭，埃塞克斯号触礁沉没。你坐在救生艇里，黑暗的海面拍打船舷，远处只有灯塔底部透出微弱的光。';
 
@@ -30,6 +33,16 @@ export default function App() {
   const [error, setError] = useState('');
   const [showGuide, setShowGuide] = useState(false);
   const [showCharacterDialog, setShowCharacterDialog] = useState(false);
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [debugEvents, setDebugEvents] = useState<DebugEvent[]>([]);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantInput, setAssistantInput] = useState('');
+  const [assistantBusy, setAssistantBusy] = useState(false);
+  const [assistantMode, setAssistantMode] = useState<AssistantMode>('auto');
+  const [assistantStatus, setAssistantStatus] = useState('可查询规则、术语或已知线索');
+  const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([
+    { role: 'assistant', content: '我是场外游戏助手。你可以问我 COC 规则、术语解释、网页操作，或让我基于已发现线索给出非剧透提示。' },
+  ]);
 
   useEffect(() => {
     // 首次进入应用时加载角色和历史会话，为开始/恢复游戏做准备。
@@ -45,6 +58,22 @@ export default function App() {
       setShowGuide(true);
     }
   }, []);
+
+  useEffect(() => {
+    try {
+      setAssistantOpen(window.localStorage.getItem(assistantOpenStorageKey) === 'true');
+    } catch {
+      setAssistantOpen(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(assistantOpenStorageKey, assistantOpen ? 'true' : 'false');
+    } catch {
+      void 0;
+    }
+  }, [assistantOpen]);
 
   useEffect(() => {
     // 历史会话下拉菜单点击外部区域时自动关闭。
@@ -243,6 +272,15 @@ export default function App() {
     }
   }
 
+  function appendDebugEvent(event: DebugEvent) {
+    const normalized = { ...event, timestamp: event.timestamp || new Date().toISOString() };
+    setDebugEvents((prev) => [...prev, normalized].slice(-maxDebugEvents));
+  }
+
+  function makeDebugEvent(phase: string, name: string, statusValue: DebugEvent['status'], message: string): DebugEvent {
+    return { phase, name, status: statusValue, message, timestamp: new Date().toISOString() };
+  }
+
   async function send(message: string) {
     // 发送玩家行动后先追加一个空守秘人消息，流式 chunk 会持续写入这条消息。
     // 【Web 流程 5】这是玩家行动的入口：输入文本 -> api.streamAction -> 后端 Agent -> 流式返回叙事。
@@ -252,15 +290,23 @@ export default function App() {
     setBusy(true);
     setError('');
     setInput('');
+    setDebugOpen(true);
+    appendDebugEvent(makeDebugEvent('frontend', 'player_action', 'start', `发送行动：${content.slice(0, 60)}`));
     setMessages((prev) => [...prev, { role: 'player', content }, { role: 'keeper', content: '' }]);
     try {
       await api.streamAction(session.id, content, (event) => {
         // 【Web 流程 6】后端流式返回三类事件：chunk 是一段文本，final 是完整结果，error 是异常。
-        if (event.type === 'chunk') {
+        if (event.type === 'start') {
+          appendDebugEvent(makeDebugEvent('stream', 'action_stream', 'start', '行动流已连接。'));
+        } else if (event.type === 'debug') {
+          appendDebugEvent(event.event);
+        } else if (event.type === 'chunk') {
           appendToLastKeeperMessage(event.content);
         } else if (event.type === 'final') {
+          appendDebugEvent(makeDebugEvent('frontend', 'render_result', 'success', '最终结果已应用到界面。'));
           applyActionResponse(event.response);
         } else if (event.type === 'error') {
+          appendDebugEvent(makeDebugEvent('stream', 'action_stream', 'error', event.detail));
           throw new Error(event.detail);
         }
       });
@@ -285,6 +331,81 @@ export default function App() {
     });
   }
 
+  async function sendAssistantMessage(message: string) {
+    const content = message.trim();
+    if (!content || assistantBusy) return;
+    setAssistantBusy(true);
+    setAssistantInput('');
+    setAssistantStatus('正在准备检索');
+    setAssistantMessages((prev) => [...prev, { role: 'user', content }, { role: 'assistant', content: '' }]);
+    try {
+      await api.streamAssistantChat({
+        session_id: session?.id ?? null,
+        message: content,
+        mode: assistantMode,
+        enable_mqe: true,
+        mqe_expansions: 2,
+        enable_hyde: null,
+        top_k: 5,
+        candidate_pool_multiplier: 4,
+      }, (event) => {
+        if (event.type === 'debug') {
+          setDebugEvents((prev) => [...prev.slice(-maxDebugEvents + 1), event.event]);
+        } else if (event.type === 'retrieval') {
+          setAssistantStatus(event.status);
+        } else if (event.type === 'chunk') {
+          appendToLastAssistantMessage(event.content);
+        } else if (event.type === 'citations') {
+          attachAssistantCitations(event.citations);
+        } else if (event.type === 'final') {
+          finalizeAssistantMessage(event.response.answer, event.response.citations, event.response.spoiler_blocked);
+          setAssistantStatus(event.response.spoiler_blocked ? '已进行非剧透处理' : '回答完成');
+        } else if (event.type === 'error') {
+          throw new Error(event.detail);
+        }
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      setAssistantStatus('助手请求失败');
+      setAssistantMessages((prev) => [...prev, { role: 'system', content: `助手请求失败：${detail}` }]);
+    } finally {
+      setAssistantBusy(false);
+    }
+  }
+
+  function appendToLastAssistantMessage(chunk: string) {
+    setAssistantMessages((prev) => {
+      const next = [...prev];
+      const index = next.length - 1;
+      if (index >= 0 && next[index].role === 'assistant') {
+        next[index] = { ...next[index], content: `${next[index].content}${chunk}` };
+      }
+      return next;
+    });
+  }
+
+  function attachAssistantCitations(citations: AssistantCitation[]) {
+    setAssistantMessages((prev) => {
+      const next = [...prev];
+      const index = next.length - 1;
+      if (index >= 0 && next[index].role === 'assistant') {
+        next[index] = { ...next[index], citations };
+      }
+      return next;
+    });
+  }
+
+  function finalizeAssistantMessage(content: string, citations: AssistantCitation[], spoilerBlocked: boolean) {
+    setAssistantMessages((prev) => {
+      const next = [...prev];
+      const index = next.length - 1;
+      if (index >= 0 && next[index].role === 'assistant') {
+        next[index] = { ...next[index], content, citations, spoilerBlocked };
+      }
+      return next;
+    });
+  }
+
   function applyActionResponse(response: ActionResponse) {
     // final 事件带有完整回合结果，用它覆盖流式文本并刷新状态栏数据。
     // 【Web 流程 7】final 到达后，页面才更新会话状态、下一步选项、线索、物品栏和检定摘要。
@@ -304,6 +425,11 @@ export default function App() {
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void send(input);
+  }
+
+  function submitAssistant(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void sendAssistantMessage(assistantInput);
   }
 
   return (
@@ -554,6 +680,31 @@ export default function App() {
           </details>
         </aside>
       </main>
+
+      <DebugConsolePanel
+        open={debugOpen}
+        events={debugEvents}
+        onToggle={() => setDebugOpen((value) => !value)}
+        onClear={() => setDebugEvents([])}
+      />
+
+      <button className="assistant-launcher" onClick={() => setAssistantOpen(true)} aria-label="打开游戏助手">
+        游戏助手
+      </button>
+
+      <GameAssistantPanel
+        open={assistantOpen}
+        messages={assistantMessages}
+        input={assistantInput}
+        mode={assistantMode}
+        busy={assistantBusy}
+        status={assistantStatus}
+        hasSession={Boolean(session)}
+        onClose={() => setAssistantOpen(false)}
+        onInputChange={setAssistantInput}
+        onModeChange={setAssistantMode}
+        onSubmit={submitAssistant}
+      />
     </div>
   );
 }
@@ -585,6 +736,184 @@ function TagList({ title, items, emptyText }: { title: string; items: string[]; 
       <h3>{title}</h3>
       {items.length ? <div className="tags">{items.map((item) => <span className="tag" key={item}>{item}</span>)}</div> : <p>{emptyText}</p>}
     </div>
+  );
+}
+
+function DebugConsolePanel({
+  open,
+  events,
+  onToggle,
+  onClear,
+}: {
+  open: boolean;
+  events: DebugEvent[];
+  onToggle: () => void;
+  onClear: () => void;
+}) {
+  const latest = events[events.length - 1];
+  const visibleEvents = [...events].reverse();
+  return (
+    <aside className={`debug-console ${open ? 'open' : ''}`} aria-label="实时调试窗口">
+      {open && (
+        <section className="debug-console-panel">
+          <div className="debug-console-header">
+            <div>
+              <p className="eyebrow">实时状态</p>
+              <h2>Agent 调试</h2>
+            </div>
+            <button onClick={onClear} disabled={!events.length}>清空</button>
+          </div>
+          <div className="debug-console-events">
+            {visibleEvents.length ? visibleEvents.map((event, index) => (
+              <article className={`debug-event ${event.status}`} key={`${event.timestamp}-${event.phase}-${event.name}-${index}`}>
+                <div className="debug-event-meta">
+                  <span>{formatDebugTime(event.timestamp)}</span>
+                  <strong>{formatDebugPhase(event.phase)}</strong>
+                  <em>{formatDebugStatus(event.status)}</em>
+                </div>
+                <div className="debug-event-name">{event.name}</div>
+                <p>{event.message || '状态已更新。'}</p>
+                {event.metadata && Object.keys(event.metadata).length > 0 && (
+                  <details className="debug-event-detail">
+                    <summary>详细数据</summary>
+                    <pre>{formatDebugMetadata(event.metadata)}</pre>
+                  </details>
+                )}
+              </article>
+            )) : <p className="debug-empty">发送行动后会显示 Agent、Skill 与 Tool 的运行状态。</p>}
+          </div>
+        </section>
+      )}
+      <button className="debug-console-toggle" onClick={onToggle} aria-expanded={open}>
+        <span>调试</span>
+        <small>{latest ? formatDebugSummary(latest) : '等待运行状态'}</small>
+      </button>
+    </aside>
+  );
+}
+
+function formatDebugSummary(event: DebugEvent): string {
+  return `${formatDebugPhase(event.phase)} · ${event.name} · ${formatDebugStatus(event.status)}`;
+}
+
+function formatDebugPhase(phase: string): string {
+  const labels: Record<string, string> = {
+    stream: '流',
+    frontend: '前端',
+    agent_node: 'Agent',
+    agent_step: '步骤',
+    skill: 'Skill',
+    tool: 'Tool',
+    assistant: '助手',
+  };
+  return labels[phase] ?? phase;
+}
+
+function formatDebugStatus(statusValue: string): string {
+  const labels: Record<string, string> = {
+    start: '开始',
+    success: '完成',
+    warning: '警告',
+    error: '错误',
+  };
+  return labels[statusValue] ?? statusValue;
+}
+
+function formatDebugTime(timestamp: string): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '--:--:--';
+  return date.toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+function formatDebugMetadata(metadata: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(metadata, null, 2);
+  } catch {
+    return String(metadata);
+  }
+}
+
+function GameAssistantPanel({
+  open,
+  messages,
+  input,
+  mode,
+  busy,
+  status,
+  hasSession,
+  onClose,
+  onInputChange,
+  onModeChange,
+  onSubmit,
+}: {
+  open: boolean;
+  messages: AssistantMessage[];
+  input: string;
+  mode: AssistantMode;
+  busy: boolean;
+  status: string;
+  hasSession: boolean;
+  onClose: () => void;
+  onInputChange: (value: string) => void;
+  onModeChange: (value: AssistantMode) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <aside className={`assistant-drawer ${open ? 'open' : ''}`} aria-hidden={!open}>
+      <div className="assistant-header">
+        <div>
+          <p className="eyebrow">场外帮助</p>
+          <h2>游戏助手</h2>
+        </div>
+        <button className="assistant-close" onClick={onClose} aria-label="关闭游戏助手">×</button>
+      </div>
+      <p className="assistant-status">{status}</p>
+      <div className="assistant-mode-row" role="group" aria-label="助手模式">
+        <button className={mode === 'auto' ? 'active' : ''} onClick={() => onModeChange('auto')}>自动</button>
+        <button className={mode === 'rules' ? 'active' : ''} onClick={() => onModeChange('rules')}>规则问答</button>
+        <button className={mode === 'session_help' ? 'active' : ''} onClick={() => onModeChange('session_help')} disabled={!hasSession}>当前局势</button>
+      </div>
+      <div className="assistant-messages">
+        {messages.map((message, index) => (
+          <article className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}>
+            <div className="message-role">{message.role === 'assistant' ? '助手' : message.role === 'user' ? '你' : '系统'}</div>
+            {message.content ? (
+              <div className="assistant-message-content">
+                <ReactMarkdown>{message.content}</ReactMarkdown>
+              </div>
+            ) : (busy && index === messages.length - 1 ? <p>思考中...</p> : null)}
+            {message.spoilerBlocked && <small className="spoiler-note">已进行非剧透处理</small>}
+            {message.citations?.length ? <AssistantCitationList citations={message.citations} /> : null}
+          </article>
+        ))}
+      </div>
+      <form className="assistant-input-row" onSubmit={onSubmit}>
+        <input
+          value={input}
+          onChange={(event) => onInputChange(event.target.value)}
+          placeholder="询问规则、术语或非剧透提示"
+          disabled={busy}
+        />
+        <button className="primary" disabled={busy || !input.trim()}>{busy ? '回答中' : '发送'}</button>
+      </form>
+    </aside>
+  );
+}
+
+function AssistantCitationList({ citations }: { citations: AssistantCitation[] }) {
+  return (
+    <details className="assistant-citations">
+      <summary>引用来源 ({citations.length})</summary>
+      <div>
+        {citations.map((citation, index) => (
+          <article className="assistant-citation" key={`${citation.id}-${index}`}>
+            <strong>{citation.citation || citation.title}</strong>
+            <small>{citation.source_type}</small>
+            {citation.snippet && <p>{citation.snippet}</p>}
+          </article>
+        ))}
+      </div>
+    </details>
   );
 }
 

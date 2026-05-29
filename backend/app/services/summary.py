@@ -56,6 +56,12 @@ def build_summary_memory_chunk(session_id: str, turn_index: int, summary: dict[s
             "source_name": "长期记忆摘要",
             "title": f"第 {turn_index} 回合总结",
             "secret_level": "玩家可见",
+            "rag_namespace": "session_memory",
+            "source_type": "memory",
+            "visibility": "player_visible",
+            "is_rag_data": False,
+            "data_source": "session_summary",
+            "citation": f"长期记忆摘要 · 第 {turn_index} 回合",
         },
     )
 

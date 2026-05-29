@@ -1,6 +1,8 @@
 import json
 import time
 from collections.abc import Iterator
+from queue import Queue
+from threading import Thread
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -8,9 +10,11 @@ from sqlalchemy.orm import Session, selectinload
 
 from app import models, schemas
 from app.config import get_settings
-from app.database import get_db, init_db
+from app.database import SessionLocal, get_db, init_db
 from app.services.agent import KeeperAgent
+from app.services.assistant_agent import GameAssistantAgent
 from app.services.characters import ensure_character_attributes
+from app.services.debug_events import emit_debug
 from app.services.importer import ensure_default_scenario, import_default_content
 from app.services.inventory import sync_character_inventory_to_session
 from app.services.retrieval import RetrievalService
@@ -25,6 +29,7 @@ from app.utils import resolve_project_path
 # 4. 真正的守秘人推理在 KeeperAgent.run_turn，也就是 backend/app/services/agent.py。
 router = APIRouter(prefix="/api")
 _agent: KeeperAgent | None = None
+_assistant_agent: GameAssistantAgent | None = None
 
 
 def get_agent() -> KeeperAgent:
@@ -34,6 +39,13 @@ def get_agent() -> KeeperAgent:
     if _agent is None:
         _agent = KeeperAgent()
     return _agent
+
+
+def get_assistant_agent() -> GameAssistantAgent:
+    global _assistant_agent
+    if _assistant_agent is None:
+        _assistant_agent = GameAssistantAgent()
+    return _assistant_agent
 
 
 def ensure_current_character_attributes(db: Session) -> models.Scenario:
@@ -151,13 +163,112 @@ def submit_action_stream(session_id: str, payload: schemas.PlayerActionIn, db: S
         # 这个内部生成器会不断 yield 字符串；FastAPI 每 yield 一次，浏览器就可能收到一小段数据。
         try:
             yield encode_stream_event({"type": "start"})
-            result = get_agent().run_turn(db, session_id, payload.message)
-            response = build_action_response(db, session_id, result)
-            # 叙事文本按小块返回，前端可以模拟守秘人逐字讲述的效果。
-            for chunk in split_stream_text(response.narration):
-                yield encode_stream_event({"type": "chunk", "content": chunk})
-                time.sleep(0.015)
-            yield encode_stream_event({"type": "final", "response": response.model_dump(mode="json")})
+            events = Queue()
+
+            def enqueue_debug(event: dict) -> None:
+                events.put({"type": "debug", "event": event})
+
+            def run_agent() -> None:
+                worker_db = SessionLocal()
+                try:
+                    emit_debug(enqueue_debug, phase="stream", name="action_stream", status="start", message="守秘人回合开始。")
+                    result = get_agent().run_turn(worker_db, session_id, payload.message, debug_emit=enqueue_debug)
+                    response = build_action_response(worker_db, session_id, result)
+                    emit_debug(enqueue_debug, phase="stream", name="action_stream", status="success", message="守秘人回合完成。")
+                    events.put({"type": "result", "response": response.model_dump(mode="json")})
+                except Exception as exc:
+                    events.put({"type": "error", "detail": str(exc)})
+                finally:
+                    worker_db.close()
+                    events.put({"type": "done"})
+
+            Thread(target=run_agent, daemon=True).start()
+            while True:
+                event = events.get()
+                if event.get("type") == "done":
+                    break
+                if event.get("type") == "result":
+                    response_payload = event["response"]
+                    for chunk in split_stream_text(str(response_payload.get("narration", ""))):
+                        yield encode_stream_event({"type": "chunk", "content": chunk})
+                        time.sleep(0.015)
+                    yield encode_stream_event({"type": "final", "response": response_payload})
+                    continue
+                yield encode_stream_event(event)
+        except Exception as exc:
+            yield encode_stream_event({"type": "error", "detail": str(exc)})
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
+@router.post("/assistant/chat", response_model=schemas.AssistantChatResponse)
+def assistant_chat(payload: schemas.AssistantChatRequest, db: Session = Depends(get_db)) -> dict:
+    if payload.session_id and db.get(models.GameSession, payload.session_id) is None:
+        raise HTTPException(status_code=404, detail="未找到指定会话")
+    return get_assistant_agent().chat(
+        db,
+        message=payload.message,
+        session_id=payload.session_id,
+        mode=payload.mode,
+        enable_mqe=payload.enable_mqe,
+        mqe_expansions=payload.mqe_expansions,
+        enable_hyde=payload.enable_hyde,
+        top_k=payload.top_k,
+        candidate_pool_multiplier=payload.candidate_pool_multiplier,
+    )
+
+
+@router.post("/assistant/chat/stream")
+def assistant_chat_stream(payload: schemas.AssistantChatRequest, db: Session = Depends(get_db)) -> StreamingResponse:
+    if payload.session_id and db.get(models.GameSession, payload.session_id) is None:
+        raise HTTPException(status_code=404, detail="未找到指定会话")
+
+    def event_stream() -> Iterator[str]:
+        try:
+            yield encode_stream_event({"type": "start"})
+            events = Queue()
+
+            def enqueue_debug(event: dict) -> None:
+                events.put({"type": "debug", "event": event})
+
+            def run_assistant() -> None:
+                worker_db = SessionLocal()
+                try:
+                    emit_debug(enqueue_debug, phase="stream", name="assistant_stream", status="start", message="助手请求开始。")
+                    result = get_assistant_agent().chat(
+                        worker_db,
+                        message=payload.message,
+                        session_id=payload.session_id,
+                        mode=payload.mode,
+                        enable_mqe=payload.enable_mqe,
+                        mqe_expansions=payload.mqe_expansions,
+                        enable_hyde=payload.enable_hyde,
+                        top_k=payload.top_k,
+                        candidate_pool_multiplier=payload.candidate_pool_multiplier,
+                        debug_emit=enqueue_debug,
+                    )
+                    emit_debug(enqueue_debug, phase="stream", name="assistant_stream", status="success", message="助手请求完成。")
+                    events.put({"type": "result", "response": result})
+                except Exception as exc:
+                    events.put({"type": "error", "detail": str(exc)})
+                finally:
+                    worker_db.close()
+                    events.put({"type": "done"})
+
+            Thread(target=run_assistant, daemon=True).start()
+            while True:
+                event = events.get()
+                if event.get("type") == "done":
+                    break
+                if event.get("type") == "result":
+                    result = event["response"]
+                    for chunk in split_stream_text(result["answer"]):
+                        yield encode_stream_event({"type": "chunk", "content": chunk})
+                        time.sleep(0.01)
+                    yield encode_stream_event({"type": "citations", "citations": result.get("citations", [])})
+                    yield encode_stream_event({"type": "final", "response": result})
+                    continue
+                yield encode_stream_event(event)
         except Exception as exc:
             yield encode_stream_event({"type": "error", "detail": str(exc)})
 

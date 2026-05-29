@@ -105,9 +105,53 @@ export interface ActionResponse {
 
 export type ActionStreamEvent =
   | { type: 'start' }
+  | { type: 'debug'; event: DebugEvent }
   | { type: 'chunk'; content: string }
   | { type: 'final'; response: ActionResponse }
   | { type: 'error'; detail: string };
+
+export interface DebugEvent {
+  phase: string;
+  name: string;
+  status: 'start' | 'success' | 'warning' | 'error' | string;
+  message: string;
+  timestamp: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AssistantCitation {
+  id: string;
+  title: string;
+  source_type: string;
+  citation: string;
+  snippet: string;
+}
+
+export interface AssistantChatResponse {
+  answer: string;
+  citations: AssistantCitation[];
+  retrieval_debug: Record<string, unknown>;
+  spoiler_blocked: boolean;
+  mode: string;
+}
+
+export type AssistantMode = 'auto' | 'rules' | 'session_help';
+
+export type AssistantStreamEvent =
+  | { type: 'start' }
+  | { type: 'debug'; event: DebugEvent }
+  | { type: 'retrieval'; status: string }
+  | { type: 'chunk'; content: string }
+  | { type: 'citations'; citations: AssistantCitation[] }
+  | { type: 'final'; response: AssistantChatResponse }
+  | { type: 'error'; detail: string };
+
+export interface AssistantMessage {
+  role: 'assistant' | 'user' | 'system';
+  content: string;
+  citations?: AssistantCitation[];
+  spoilerBlocked?: boolean;
+}
 
 export interface ChatMessage {
   role: 'keeper' | 'player' | 'system';

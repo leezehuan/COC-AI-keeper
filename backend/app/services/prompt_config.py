@@ -52,9 +52,13 @@ INTENT_USER_PROMPT_TEMPLATE = """当前地点：{current_location}
 
 玩家输入：{player_input}
 
+{clarification_context}
+
 请解析玩家本轮输入的主要意图。
 
 如果玩家输入模糊，例如“我看看”“我调查一下”“我问问”“我处理一下”，并且当前场景中可能有多个对象或多种解释，请将 needs_clarification 设为 true。
+
+如果玩家本轮是对上一轮追问的回答，请将原动作、追问内容、本轮回答一并纳入，推断完整意图，不要再次追问。
 
 只输出 JSON 对象。
 
@@ -221,6 +225,112 @@ content 只能写玩家已经发现或可合理理解的内容，不要写幕后
 options 应提供可执行的替代方向。
 只输出 JSON。不要输出其他内容。"""
 
+# 回合计划节点：用于生成 Plan-and-Solve 的结构化回合计划。
+TURN_PLAN_SYSTEM_PROMPT = """你是克苏鲁调查游戏的“回合计划节点”。
+
+你的职责是为玩家本轮行动生成结构化计划，不负责叙事、不负责写状态、不负责掷骰。
+
+计划是后续 ReAct 执行的约束。你只能从提供的 Tool / Skill 名称中选择白名单。
+
+你必须避免剧透，不要把未发现线索、主持人秘密、幕后真相写入玩家可见字段。
+
+输出必须是一个合法 JSON 对象。
+
+不要输出 Markdown。
+
+不要输出代码块。
+
+不要在 JSON 外添加任何内容。
+
+JSON 必须且只能包含以下字段：
+
+intent, goal, assumptions, needs_clarification, clarification_question, action_type, required_context, allowed_tools, allowed_skills, possible_checks, risk_level, expected_state_delta, success_criteria, fallback。"""
+TURN_PLAN_USER_PROMPT_TEMPLATE = """【当前玩家可见状态】
+
+当前位置：{current_location}
+
+当前场景：{current_scene}
+
+当前时间：{current_time}
+
+角色：{character_archetype}
+
+物品：{inventory_text}
+
+已发现线索：{known_clues}
+
+会话摘要：{summary}
+
+【玩家输入】
+
+{player_input}
+
+【可选 Tools】
+
+{available_tools}
+
+【可选 Skills】
+
+{available_skills}
+
+请生成本回合计划。
+
+约束：
+
+1. allowed_tools 只能从可选 Tools 中选择。
+2. allowed_skills 只能从可选 Skills 中选择。
+3. 如果玩家行动过于模糊，将 needs_clarification 设为 true，并给出 clarification_question。
+4. 不要请求写数据库、提交状态、绕过校验或直接防剧透。
+5. 只输出 JSON。"""
+
+# Reflection 节点：用于在提交前检查叙事、状态和计划遵循度。
+REFLECTION_SYSTEM_PROMPT = """你是克苏鲁调查游戏的“Reflection 自检节点”。
+
+你的职责是在最终提交前检查守秘人叙事、状态变化和执行摘要。
+
+你不能写数据库，不能直接修改角色状态，不能泄露幕后真相。
+
+确定性 guardrails 的结论优先于你的建议。
+
+输出必须是一个合法 JSON 对象。
+
+不要输出 Markdown。
+
+JSON 必须且只能包含以下字段：
+
+result, issues, repair_text, repair_state_delta, rerun_tool, replan_once, ask_clarification, fail_safe, reason。"""
+REFLECTION_USER_PROMPT_TEMPLATE = """【回合计划】
+
+{turn_plan}
+
+【ReAct 执行摘要】
+
+{react_trace}
+
+【候选叙事】
+
+{narration}
+
+【候选状态变化】
+
+{state_delta}
+
+【确定性校验报告】
+
+{validation_report}
+
+【防剧透报告】
+
+{leak_report}
+
+请检查规则一致性、剧情一致性、防剧透、状态合法性、玩家公平性、叙事质量和计划遵循度。
+
+result 只能为以下之一：
+
+pass, repair_text, repair_state_delta, rerun_tool, replan_once, ask_clarification, fail_safe。
+
+只输出 JSON。"""
+
 # 回合总结节点：用于压缩会话记忆，只保留玩家可见信息。
 TURN_SUMMARY_SYSTEM_PROMPT = """你是克苏鲁调查游戏的“回合总结节点”。
 
@@ -304,7 +414,7 @@ NPC 真实身份或隐藏动机。
 只输出 JSON。不要输出其他内容。"""
 
 
-def build_intent_prompt(current_location: str, current_scene: str, player_input: str) -> list[dict[str, str]]:
+def build_intent_prompt(current_location: str, current_scene: str, player_input: str, clarification_context: str = "") -> list[dict[str, str]]:
     return [
         {"role": "system", "content": INTENT_SYSTEM_PROMPT},
         {
@@ -313,6 +423,7 @@ def build_intent_prompt(current_location: str, current_scene: str, player_input:
                 current_location=current_location,
                 current_scene=current_scene,
                 player_input=player_input,
+                clarification_context=clarification_context,
             ),
         },
     ]
@@ -364,6 +475,56 @@ def build_keeper_response_prompt(
                 clue_text=clue_text,
                 memory_text=memory_text,
                 rule_text=rule_text,
+            ),
+        },
+    ]
+
+
+def build_turn_plan_prompt(
+    *,
+    current_location: str,
+    current_scene: str,
+    current_time: str,
+    character_archetype: str,
+    inventory_text: str,
+    known_clues: str,
+    summary: str,
+    player_input: str,
+    available_tools: list[str],
+    available_skills: list[str],
+) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": TURN_PLAN_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": TURN_PLAN_USER_PROMPT_TEMPLATE.format(
+                current_location=current_location,
+                current_scene=current_scene,
+                current_time=current_time,
+                character_archetype=character_archetype,
+                inventory_text=inventory_text,
+                known_clues=known_clues,
+                summary=summary,
+                player_input=player_input,
+                available_tools=", ".join(available_tools),
+                available_skills=", ".join(available_skills),
+            ),
+        },
+    ]
+
+
+def build_reflection_prompt(state: dict[str, Any]) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": REFLECTION_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": REFLECTION_USER_PROMPT_TEMPLATE.format(
+                turn_plan=state.get("turn_plan", {}),
+                react_trace=state.get("react_trace", []),
+                narration=state.get("narration", ""),
+                state_delta=state.get("state_delta", {}),
+                validation_report=state.get("validation_report", {}),
+                leak_report=state.get("leak_report", {}),
             ),
         },
     ]
