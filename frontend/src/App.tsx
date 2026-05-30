@@ -15,6 +15,7 @@ const assistantOpenStorageKey = 'coc-lite-game-assistant-open';
 const maxDebugEvents = 200;
 
 const openingText = '现在是 1926 年四月十二日，晚上八点十五分左右。航标岛上的灯塔在暴风雨前熄灭，埃塞克斯号触礁沉没。你坐在救生艇里，黑暗的海面拍打船舷，远处只有灯塔底部透出微弱的光。';
+const openingImageUrl = `${assetBase}/images/opening.jpg`;
 
 export default function App() {
   // 主组件集中管理会话、聊天记录、角色选择、新手引导和右侧状态栏数据。
@@ -25,7 +26,7 @@ export default function App() {
   const [selectedSession, setSelectedSession] = useState('');
   const [selectedCharacter, setSelectedCharacter] = useState('');
   const [session, setSession] = useState<GameSession | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([{ role: 'keeper', content: openingText }]);
+  const [messages, setMessages] = useState<ChatMessage[]>([{ role: 'keeper', content: openingText, imageUrl: openingImageUrl }]);
   const [options, setOptions] = useState<string[]>(['观察海面和灯塔', '划向北岸码头', '检查救生艇', '自定义行动']);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -193,7 +194,7 @@ export default function App() {
     try {
       const created = await api.createSession(characterToUse);
       setSession(created);
-      setMessages([{ role: 'keeper', content: openingText }]);
+      setMessages([{ role: 'keeper', content: openingText, imageUrl: openingImageUrl }]);
       setOptions(['观察海面和灯塔', '划向北岸码头', '检查救生艇', '自定义行动']);
       setStatus(`会话已创建：${created.character.archetype}`);
       setShowCharacterDialog(false);
@@ -257,7 +258,7 @@ export default function App() {
 
   function resetCurrentSession() {
     setSession(null);
-    setMessages([{ role: 'keeper', content: openingText }]);
+    setMessages([{ role: 'keeper', content: openingText, imageUrl: openingImageUrl }]);
     setOptions(['观察海面和灯塔', '划向北岸码头', '检查救生艇', '自定义行动']);
     setInput('');
   }
@@ -305,6 +306,8 @@ export default function App() {
         } else if (event.type === 'final') {
           appendDebugEvent(makeDebugEvent('frontend', 'render_result', 'success', '最终结果已应用到界面。'));
           applyActionResponse(event.response);
+        } else if (event.type === 'image') {
+          attachImageToKeeperMessage(event.turnId, event.url, event.metadata);
         } else if (event.type === 'error') {
           appendDebugEvent(makeDebugEvent('stream', 'action_stream', 'error', event.detail));
           throw new Error(event.detail);
@@ -416,7 +419,29 @@ export default function App() {
       const next = [...prev];
       const index = next.length - 1;
       if (index >= 0 && next[index].role === 'keeper') {
-        next[index] = { ...next[index], content: response.narration, meta };
+        next[index] = {
+          ...next[index],
+          content: response.narration,
+          meta,
+          imageUrl: response.image_url ?? undefined,
+          imageMetadata: response.image_metadata,
+          imageLoading: response.needs_image && !response.image_url,
+          imageAspectRatio: response.image_aspect_ratio,
+        };
+      }
+      return next;
+    });
+  }
+
+  function attachImageToKeeperMessage(turnId: string, url: string, metadata?: Record<string, unknown>) {
+    setMessages((prev) => {
+      const next = [...prev];
+      // 优先精确匹配尚未附带图片的 keeper 消息；兜底则匹配最后一条 keeper
+      for (let i = next.length - 1; i >= 0; i--) {
+        if (next[i].role === 'keeper' && !next[i].imageUrl) {
+          next[i] = { ...next[i], imageUrl: url, imageMetadata: metadata, imageLoading: false };
+          break;
+        }
       }
       return next;
     });
@@ -602,6 +627,22 @@ export default function App() {
                 <div className="message-role">{message.role === 'keeper' ? '守秘人' : message.role === 'player' ? '调查员' : '系统'}</div>
                 <p>{message.content}</p>
                 {message.meta && <span className="meta">{message.meta}</span>}
+                {message.imageUrl && (
+                  <img
+                    src={message.imageUrl}
+                    alt="场景配图"
+                    className="message-image"
+                    loading="lazy"
+                  />
+                )}
+                {!message.imageUrl && message.imageLoading && (
+                  <div
+                    className="image-placeholder"
+                    style={{ aspectRatio: message.imageAspectRatio || '16/9' }}
+                  >
+                    正在生成场景图…
+                  </div>
+                )}
               </article>
             ))}
           </div>
@@ -942,11 +983,16 @@ function InventoryList({ items }: { items: InventoryItem[] }) {
 function buildMessagesFromSession(session: GameSession): ChatMessage[] {
   // 后端只返回最近回合，因此恢复界面展示的是近期上下文而非完整历史。
   // 初学者可以把 recent_turns 理解成“服务器保存的聊天记录切片”，这里把它重新拼成前端消息数组。
-  if (!session.recent_turns.length) return [{ role: 'keeper', content: openingText }];
+  if (!session.recent_turns.length) return [{ role: 'keeper', content: openingText, imageUrl: openingImageUrl }];
   const messages: ChatMessage[] = [];
   session.recent_turns.forEach((turn) => {
     messages.push({ role: 'player', content: turn.player_input });
-    messages.push({ role: 'keeper', content: turn.keeper_response });
+    messages.push({
+      role: 'keeper',
+      content: turn.keeper_response,
+      imageUrl: turn.image_url ?? undefined,
+      imageMetadata: turn.image_metadata,
+    });
   });
   return messages;
 }

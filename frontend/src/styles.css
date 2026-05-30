@@ -519,6 +519,29 @@ small {
   margin: 8px 0 0;
 }
 
+.message-image {
+  display: block;
+  max-width: 100%;
+  width: 100%;
+  height: auto;
+  margin-top: 12px;
+  border-radius: 14px;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.image-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  margin-top: 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #bba882;
+  font-size: 0.88rem;
+}
+
 .options {
   display: flex;
   flex-wrap: wrap;

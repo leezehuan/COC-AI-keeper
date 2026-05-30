@@ -79,6 +79,12 @@ class KeeperState(TypedDict, total=False):
     repair_attempts: int
     final_guardrail_report: dict[str, Any]
     debug_emit: DebugEmitter
+    needs_image: bool
+    image_scene_type: str
+    image_url: str | None
+    image_prompt_raw: str
+    image_prompt_optimized: str
+    image_metadata: dict[str, Any]
 
 
 class KeeperAgent:
@@ -481,6 +487,12 @@ class KeeperAgent:
         state["generated_payload"] = generated
         state["narration"] = str(generated.get("narration") or fallback["narration"])
         state["options"] = ensure_options(generated.get("options") or fallback["options"])
+        state["needs_image"] = bool(generated.get("needs_image"))
+        state["image_scene_type"] = str(generated.get("image_scene_type") or "")
+        state["image_url"] = None
+        state["image_prompt_raw"] = ""
+        state["image_prompt_optimized"] = ""
+        state["image_metadata"] = {}
         return state
 
     def generate_state_delta(self, state: KeeperState) -> KeeperState:
@@ -717,6 +729,13 @@ class KeeperAgent:
             dice_results=state.get("dice_results", []),
             keeper_response=state.get("narration", ""),
             state_delta=delta,
+            image_url=state.get("image_url"),
+            image_metadata={
+                "needs_image": state.get("needs_image", False),
+                "scene_type": state.get("image_scene_type", ""),
+                "prompt_raw": state.get("image_prompt_raw", ""),
+                "prompt_optimized": state.get("image_prompt_optimized", ""),
+            },
         )
         db.add(log)
         memory_chunks = [chunk for chunk in [build_session_memory_chunk(session.id, turn_index, state), build_summary_memory_chunk(session.id, turn_index, summary)] if chunk is not None]

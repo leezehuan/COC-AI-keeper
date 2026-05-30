@@ -17,6 +17,7 @@ from app.services.characters import ensure_character_attributes
 from app.services.debug_events import emit_debug
 from app.services.importer import ensure_default_scenario, import_default_content
 from app.services.inventory import sync_character_inventory_to_session
+from app.services.image_generator import ImageGenerator
 from app.services.retrieval import RetrievalService
 from app.services.story_state import ensure_story_state
 from app.utils import resolve_project_path
@@ -150,6 +151,15 @@ def submit_action(session_id: str, payload: schemas.PlayerActionIn, db: Session 
         raise HTTPException(status_code=404, detail="未找到指定会话")
     # 非流式接口直接等待守秘人完整回合执行完毕后返回。
     result = get_agent().run_turn(db, session_id, payload.message)
+    if result.get("needs_image"):
+        session = db.get(models.GameSession, session_id)
+        if session and session.turn_logs:
+            latest_turn = max(session.turn_logs, key=lambda log: log.turn_index)
+            image_gen = ImageGenerator()
+            image_url = image_gen.generate_and_save(db, latest_turn.id, result["narration"], result.get("image_scene_type", ""))
+            if image_url:
+                result["image_url"] = image_url
+                result["image_metadata"] = latest_turn.image_metadata
     return build_action_response(db, session_id, result)
 
 
@@ -176,6 +186,16 @@ def submit_action_stream(session_id: str, payload: schemas.PlayerActionIn, db: S
                     response = build_action_response(worker_db, session_id, result)
                     emit_debug(enqueue_debug, phase="stream", name="action_stream", status="success", message="守秘人回合完成。")
                     events.put({"type": "result", "response": response.model_dump(mode="json")})
+                    if result.get("needs_image"):
+                        session = worker_db.get(models.GameSession, session_id)
+                        if session and session.turn_logs:
+                            latest_turn = max(session.turn_logs, key=lambda log: log.turn_index)
+                            image_gen = ImageGenerator()
+                            image_url = image_gen.generate_and_save(worker_db, latest_turn.id, result["narration"], result.get("image_scene_type", ""))
+                            if image_url:
+                                events.put({"type": "image", "url": image_url, "turn_id": latest_turn.id, "metadata": latest_turn.image_metadata})
+                            else:
+                                emit_debug(enqueue_debug, phase="stream", name="image_generation", status="warning", message="图片生成失败或配置未启用。")
                 except Exception as exc:
                     events.put({"type": "error", "detail": str(exc)})
                 finally:
@@ -193,6 +213,9 @@ def submit_action_stream(session_id: str, payload: schemas.PlayerActionIn, db: S
                         yield encode_stream_event({"type": "chunk", "content": chunk})
                         time.sleep(0.015)
                     yield encode_stream_event({"type": "final", "response": response_payload})
+                    continue
+                if event.get("type") == "image":
+                    yield encode_stream_event({"type": "image", "url": event["url"], "turnId": event["turn_id"], "metadata": event.get("metadata", {})})
                     continue
                 yield encode_stream_event(event)
         except Exception as exc:
@@ -275,6 +298,10 @@ def assistant_chat_stream(payload: schemas.AssistantChatRequest, db: Session = D
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
+def _scene_type_to_aspect_ratio(scene_type: str) -> str:
+    return "16:9" if scene_type == "new_scene" else "1:1"
+
+
 def build_action_response(db: Session, session_id: str, result: dict) -> schemas.ActionResponse:
     # Agent 的内部状态较大，这里只整理前端需要展示和持久化的公开字段。
     session_out = build_session_out(db, session_id)
@@ -288,6 +315,10 @@ def build_action_response(db: Session, session_id: str, result: dict) -> schemas
         discovered_clues=[schemas.ClueOut.model_validate(clue) for clue in result.get("discovered_clues", [])],
         state_delta=result.get("state_delta", {}),
         needs_clarification=bool(result.get("needs_clarification")),
+        needs_image=bool(result.get("needs_image")),
+        image_aspect_ratio=_scene_type_to_aspect_ratio(result.get("image_scene_type", "")),
+        image_url=result.get("image_url"),
+        image_metadata=result.get("image_metadata", {}),
     )
 
 

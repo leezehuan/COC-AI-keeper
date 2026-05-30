@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-v4"
     embedding_dimensions: int | None = Field(default=1024)
 
+    drawing_api_url: str = "https://api.aabao.top/v1/images/generations"
+    drawing_api_key: str = ""
+    drawing_model: str = "doubao-seedream-4-5-251128"
+    drawing_llm_base_url: str = ""
+    drawing_llm_api_key: str = ""
+    drawing_llm_model: str = ""
+
     chroma_path: str = "./data/chroma"
     scenario_path: str = "./无光的灯塔/无光的灯塔/full.md"
     rulebook_paths: str = "./keeper-rulebook/主持人规则书.md,./investigator-handbook/full.md"

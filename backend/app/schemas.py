@@ -77,6 +77,8 @@ class TurnLogOut(BaseModel):
     dice_results: list[Any]
     keeper_response: str
     state_delta: dict[str, Any]
+    image_url: str | None = None
+    image_metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
 
@@ -138,6 +140,10 @@ class ActionResponse(BaseModel):
     discovered_clues: list[ClueOut]
     state_delta: dict[str, Any]
     needs_clarification: bool = False
+    needs_image: bool = False
+    image_aspect_ratio: str = ""
+    image_url: str | None = None
+    image_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class AssistantChatRequest(BaseModel):

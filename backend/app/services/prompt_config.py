@@ -98,7 +98,7 @@ KEEPER_RESPONSE_SYSTEM_PROMPT = """你是《克苏鲁的呼唤》AI 守秘人。
 
 JSON 必须且只能包含以下顶层字段：
 
-narration, options, state_delta, discovered_clues。"""
+narration, options, state_delta, discovered_clues, needs_image, image_scene_type。"""
 KEEPER_RESPONSE_USER_PROMPT_TEMPLATE = """【当前状态】
 
 当前地点：{current_location}
@@ -157,7 +157,7 @@ SAN：{san_current}
 
 只输出一个合法 JSON 对象，顶层字段必须为：
 
-narration, options, state_delta, discovered_clues。
+narration, options, state_delta, discovered_clues, needs_image, image_scene_type。
 
 narration：
 
@@ -216,6 +216,16 @@ discovered_clues：
 每项必须包含 clue_key, name, content, source_location。
 clue_key 应优先使用线索索引中的已有 key；如果资料中没有明确 key，可以生成稳定的简短 key。
 content 只能写玩家已经发现或可合理理解的内容，不要写幕后解释。
+needs_image：
+
+类型为布尔值。
+当且仅当以下情况之一发生时设为 true：玩家进入全新地点或场景、遭遇怪物或异常生物、发现重要的新物品或关键线索、发生值得视觉化的戏剧性事件（如战斗、仪式、逃跑）。
+普通调查、对话、等待等不需要配图时设为 false。
+image_scene_type：
+
+类型为字符串。
+当 needs_image 为 true 时，从以下枚举中选择一个：new_scene（进入新场景）、encounter（遭遇怪物/NPC）、item_discovery（发现新物品）、other（其他值得配图的场景）。
+当 needs_image 为 false 时，使用空字符串。
 如果玩家行动偏离剧情：
 
 不要直接说“不行”。
@@ -224,6 +234,8 @@ content 只能写玩家已经发现或可合理理解的内容，不要写幕后
 如果玩家强行尝试，应给出合理风险、时间代价或后果。
 options 应提供可执行的替代方向。
 只输出 JSON。不要输出其他内容。"""
+
+IMAGE_PROMPT_OPTIMIZER_SYSTEM_PROMPT = """你是一个专业的AI绘画提示词优化专家。请将用户输入的中文描述优化并翻译成高质量的英文绘画提示词。要求：1.保持原意不变 2.增加艺术性描述 3.使用专业绘画术语 4.直接返回优化后的英文提示词，不要解释过程"""
 
 # 回合计划节点：用于生成 Plan-and-Solve 的结构化回合计划。
 TURN_PLAN_SYSTEM_PROMPT = """你是克苏鲁调查游戏的“回合计划节点”。
@@ -244,7 +256,9 @@ TURN_PLAN_SYSTEM_PROMPT = """你是克苏鲁调查游戏的“回合计划节点
 
 JSON 必须且只能包含以下字段：
 
-intent, goal, assumptions, needs_clarification, clarification_question, action_type, required_context, allowed_tools, allowed_skills, possible_checks, risk_level, expected_state_delta, success_criteria, fallback。"""
+intent, goal, assumptions, needs_clarification, clarification_question, action_type, required_context, allowed_tools, allowed_skills, possible_checks, risk_level, expected_state_delta, success_criteria, fallback。
+
+所有字段值必须使用中文输出，尤其是 clarification_question，必须用一句中文向玩家询问。"""
 TURN_PLAN_USER_PROMPT_TEMPLATE = """【当前玩家可见状态】
 
 当前位置：{current_location}
@@ -279,9 +293,12 @@ TURN_PLAN_USER_PROMPT_TEMPLATE = """【当前玩家可见状态】
 
 1. allowed_tools 只能从可选 Tools 中选择。
 2. allowed_skills 只能从可选 Skills 中选择。
-3. 如果玩家行动过于模糊，将 needs_clarification 设为 true，并给出 clarification_question。
-4. 不要请求写数据库、提交状态、绕过校验或直接防剧透。
-5. 只输出 JSON。"""
+3. 如果玩家行动过于模糊，将 needs_clarification 设为 true，并给出 clarification_question；clarification_question 必须用中文。
+   - 以下情况视为明确，needs_clarification 必须设为 false：目标地点或对象已具体命名（如"前往灯塔底部"）、行动动词清晰（如检查、移动、使用某物品）。
+   - 只有以下情况才应追问：缺少具体目标（如只说"调查一下"）、行动方式存在多种互斥可能且影响剧情走向、当前状态无法执行该行动。
+4. 所有字段值必须使用中文输出，不要出现英文。
+5. 不要请求写数据库、提交状态、绕过校验或直接防剧透。
+6. 只输出 JSON。"""
 
 # Reflection 节点：用于在提交前检查叙事、状态和计划遵循度。
 REFLECTION_SYSTEM_PROMPT = """你是克苏鲁调查游戏的“Reflection 自检节点”。
@@ -527,6 +544,13 @@ def build_reflection_prompt(state: dict[str, Any]) -> list[dict[str, str]]:
                 leak_report=state.get("leak_report", {}),
             ),
         },
+    ]
+
+
+def build_image_prompt_optimizer(raw_prompt: str) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": IMAGE_PROMPT_OPTIMIZER_SYSTEM_PROMPT},
+        {"role": "user", "content": raw_prompt},
     ]
 
 

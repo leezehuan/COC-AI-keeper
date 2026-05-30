@@ -46,6 +46,8 @@ export interface TurnLog {
   dice_results: unknown[];
   keeper_response: string;
   state_delta: Record<string, unknown>;
+  image_url: string | null;
+  image_metadata: Record<string, unknown>;
   created_at: string;
 }
 
@@ -101,6 +103,10 @@ export interface ActionResponse {
   discovered_clues: Clue[];
   state_delta: Record<string, unknown>;
   needs_clarification: boolean;
+  needs_image: boolean;
+  image_aspect_ratio: string;
+  image_url: string | null;
+  image_metadata: Record<string, unknown>;
 }
 
 export type ActionStreamEvent =
@@ -108,6 +114,7 @@ export type ActionStreamEvent =
   | { type: 'debug'; event: DebugEvent }
   | { type: 'chunk'; content: string }
   | { type: 'final'; response: ActionResponse }
+  | { type: 'image'; url: string; turnId: string; metadata?: Record<string, unknown> }
   | { type: 'error'; detail: string };
 
 export interface DebugEvent {
@@ -157,4 +164,8 @@ export interface ChatMessage {
   role: 'keeper' | 'player' | 'system';
   content: string;
   meta?: string;
+  imageUrl?: string;
+  imageMetadata?: Record<string, unknown>;
+  imageLoading?: boolean;
+  imageAspectRatio?: string;
 }

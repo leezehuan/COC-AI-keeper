@@ -87,6 +87,8 @@ class TurnLog(Base):
     dice_results: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     keeper_response: Mapped[str] = mapped_column(Text, nullable=False)
     state_delta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_metadata: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     session: Mapped[GameSession] = relationship(back_populates="turn_logs")
