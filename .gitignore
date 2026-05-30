@@ -47,5 +47,19 @@ desktop.ini
 .vscode/
 .idea/
 
+# 设计文档（部署无关）
 克苏鲁提示词.md
 克苏鲁lite设计.md
+克苏鲁lite设计-v1.md
+v2设计.md
+
+# 旧版 / 归档文件
+README-旧版.md
+coc-lite.zip
+
+# 调试 / 临时脚本
+drop_turn_logs.py
+
+
+# IDE 工作流
+.windsurf/
