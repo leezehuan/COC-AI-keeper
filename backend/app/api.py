@@ -221,7 +221,11 @@ def submit_action_stream(session_id: str, payload: schemas.PlayerActionIn, db: S
         except Exception as exc:
             yield encode_stream_event({"type": "error", "detail": str(exc)})
 
-    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 @router.post("/assistant/chat", response_model=schemas.AssistantChatResponse)
@@ -295,7 +299,11 @@ def assistant_chat_stream(payload: schemas.AssistantChatRequest, db: Session = D
         except Exception as exc:
             yield encode_stream_event({"type": "error", "detail": str(exc)})
 
-    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 def _scene_type_to_aspect_ratio(scene_type: str) -> str:

@@ -36,7 +36,7 @@ export default function App() {
   const [showCharacterDialog, setShowCharacterDialog] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
   const [debugEvents, setDebugEvents] = useState<DebugEvent[]>([]);
-  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(true);
   const [assistantInput, setAssistantInput] = useState('');
   const [assistantBusy, setAssistantBusy] = useState(false);
   const [assistantMode, setAssistantMode] = useState<AssistantMode>('auto');
@@ -62,9 +62,10 @@ export default function App() {
 
   useEffect(() => {
     try {
-      setAssistantOpen(window.localStorage.getItem(assistantOpenStorageKey) === 'true');
+      const stored = window.localStorage.getItem(assistantOpenStorageKey);
+      setAssistantOpen(stored === null ? true : stored === 'true');
     } catch {
-      setAssistantOpen(false);
+      setAssistantOpen(true);
     }
   }, []);
 
