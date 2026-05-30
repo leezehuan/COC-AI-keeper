@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 from app import models, schemas
 from app.config import get_settings
 from app.database import SessionLocal, get_db, init_db
-from app.services.agent import KeeperAgent
+from app.services.agents import KeeperSupervisor
 from app.services.assistant_agent import GameAssistantAgent
 from app.services.characters import ensure_character_attributes
 from app.services.debug_events import emit_debug
@@ -27,18 +27,18 @@ from app.utils import resolve_project_path
 # 1. 前端请求 /coc/api/characters、/sessions、/actions/stream。
 # 2. FastAPI 根据下面的 @router.get / @router.post 找到对应函数。
 # 3. 普通接口直接返回 JSON；流式接口用 StreamingResponse 持续返回 NDJSON。
-# 4. 真正的守秘人推理在 KeeperAgent.run_turn，也就是 backend/app/services/agent.py。
+# 4. 真正的守秘人推理在 KeeperSupervisor.run_turn，也就是 backend/app/services/agents/supervisor.py。
 router = APIRouter(prefix="/api")
-_agent: KeeperAgent | None = None
+_agent: KeeperSupervisor | None = None
 _assistant_agent: GameAssistantAgent | None = None
 
 
-def get_agent() -> KeeperAgent:
-    # KeeperAgent 初始化较重，使用进程内单例复用 LangGraph、LLM 与检索服务。
-    # 初学者注意：这里不是每次请求都 new 一个 Agent，否则会重复构建图和客户端，浪费资源。
+def get_agent() -> KeeperSupervisor:
+    # KeeperSupervisor 初始化较重，使用进程内单例复用各子 Agent、LLM 与检索服务。
+    # 初学者注意：这里不是每次请求都 new 一个 Supervisor，否则会重复构建客户端，浪费资源。
     global _agent
     if _agent is None:
-        _agent = KeeperAgent()
+        _agent = KeeperSupervisor()
     return _agent
 
 

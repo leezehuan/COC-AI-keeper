@@ -24,6 +24,7 @@ from app.services.rules import adjudicate_action, as_adjudication_dict, execute_
 from app.services.skills import SKILL_SPECS, choose_skill_name, run_skill
 from app.services.story_state import apply_turn_delta, build_turn_delta, ensure_story_state
 from app.services.summary import apply_summary_to_session, build_summary_memory_chunk, build_turn_summary
+from app.services.agents.supervisor import KeeperSupervisor
 from app.utils import safe_key
 
 
@@ -87,7 +88,12 @@ class KeeperState(TypedDict, total=False):
     image_metadata: dict[str, Any]
 
 
-class KeeperAgent:
+class KeeperAgent(KeeperSupervisor):
+    """向后兼容壳：内部逻辑已迁移到 KeeperSupervisor 与各子 Agent。"""
+    pass
+
+
+class _OldKeeperAgent:
     def __init__(self) -> None:
         # LLMClient 负责调用大模型；RetrievalService 负责向量检索；graph 是 LangGraph 编译后的执行图。
         self.llm = LLMClient()
