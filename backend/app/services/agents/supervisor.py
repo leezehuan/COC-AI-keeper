@@ -1,3 +1,40 @@
+# =============================================================================
+# 【KeeperSupervisor：多 Agent 调度器】
+# =============================================================================
+# 这是整个回合执行流程的"大脑"——负责按顺序调度各个 Agent 并处理异常。
+# 你可以把它理解为"项目经理"：自己不干活，但确保每个专业工人按时完成任务。
+#
+# 完整的回合流程（run_turn）：
+#
+# Phase 1: ContextAgent（情报收集）
+#   → 加载会话状态、解析玩家意图、RAG 检索
+#
+# Phase 2: PlannerAgent（制定计划）
+#   → 生成回合计划、校验白名单
+#   → 如果需要追问 → 跳过后续 Phase，直接追问玩家
+#
+# Phase 3: ExecutorAgent（执行计划）
+#   → 执行 Skill、规则裁定、掷骰检定、综合裁定
+#
+# Phase 4: NarratorAgent（生成叙事）
+#   → 生成守秘人叙事文本、玩家选项、状态增量
+#
+# Phase 5: GuardAgent（质量检查）
+#   → 确定性校验、Reflection 自检、防剧透清洗、修复判断
+#
+# Phase 5.5: Repair Loop（修复循环，最多 2 次）
+#   → 如果 GuardAgent 发现问题，根据修复类型执行相应操作
+#   → repair_text: 让 NarratorAgent 重新生成叙事
+#   → repair_state_delta: 修复状态增量
+#   → ask_clarification/fail_safe: 构造追问/兜底响应
+#   → replan_once: 重新规划一次
+#
+# Phase 6: _commit_state（落库保存）
+#   → 更新 PostgreSQL（状态、线索、物品、回合日志）
+#   → 写入 ChromaDB（会话记忆向量）
+#
+# 对外接口与旧 KeeperAgent.run_turn 完全兼容。
+# =============================================================================
 from __future__ import annotations
 
 from typing import Any
@@ -28,23 +65,95 @@ from app.utils import safe_key
 
 
 class KeeperSupervisor:
-    """多 Agent 调度器，负责回合流程编排、修复循环控制与最终落库。
+    """多 Agent 调度器（可以理解为"项目经理/指挥中心"）。
 
-    对外接口保持与旧 KeeperAgent 一致，内部通过消息信封在各 Agent 之间传递数据。
+    【中文名称】守秘人调度器 / 主管 Agent
+
+    【功能说明】
+    这是整个回合流程的中央控制器。它不执行具体的业务逻辑，
+    而是负责：
+    1. 按顺序调度 5 个专业 Agent
+    2. 在 Agent 之间传递数据（组装 AgentMessage 信封）
+    3. 处理修复循环（最多 2 次）
+    4. 最终将结果写入数据库
+
+    【为什么需要调度器】
+    5 个 Agent 各司其职，但需要有人协调它们的工作顺序和数据传递。
+    就像建筑工地需要工头来协调电工、水管工、木工的工作顺序。
+    没有 Supervisor，Agent 们不知道谁先谁后、数据怎么传递。
+
+    【对外接口】
+    run_turn(db, session_id, player_input, debug_emit) → dict
+    与旧版 KeeperAgent.run_turn 保持完全兼容。
     """
 
     def __init__(self) -> None:
-        self.llm = LLMClient()
-        self.retrieval = RetrievalService()
-        self.context = AgentContext(llm=self.llm, retrieval=self.retrieval)
-        self.context_agent = ContextAgent(self.context)
-        self.planner_agent = PlannerAgent(self.context)
-        self.executor_agent = ExecutorAgent(self.context)
-        self.narrator_agent = NarratorAgent(self.context)
-        self.guard_agent = GuardAgent(self.context)
+        """初始化调度器（__init__ = 构造函数/初始化方法）。
+
+        【中文名称】初始化
+
+        【功能说明】
+        创建 KeeperSupervisor 实例时自动调用。完成以下初始化工作：
+        1. 创建 LLM 客户端（用于调用大语言模型）
+        2. 创建检索服务（用于查询 ChromaDB）
+        3. 创建共享上下文（AgentContext，注入 LLM 和检索服务）
+        4. 创建 5 个专业 Agent 实例（注入共享上下文）
+
+        【创建的 Agent 列表】
+        - context_agent: ContextAgent → 上下文加载与意图解析
+        - planner_agent: PlannerAgent → 回合计划生成
+        - executor_agent: ExecutorAgent → 计划执行与规则检定
+        - narrator_agent: NarratorAgent → 守秘人叙事生成
+        - guard_agent: GuardAgent → 守卫校验与防剧透
+
+        【参数说明】无参数
+        【返回值】无（返回 None）
+        """
+        self.llm = LLMClient()  # 创建 LLM 客户端
+        self.retrieval = RetrievalService()  # 创建向量检索服务
+        self.context = AgentContext(llm=self.llm, retrieval=self.retrieval)  # 创建共享服务上下文
+        # 创建五个专业 Agent，注入共享上下文
+        self.context_agent = ContextAgent(self.context)  # 上下文加载与意图解析
+        self.planner_agent = PlannerAgent(self.context)  # 回合计划生成
+        self.executor_agent = ExecutorAgent(self.context)  # 计划执行与规则检定
+        self.narrator_agent = NarratorAgent(self.context)  # 守秘人叙事生成
+        self.guard_agent = GuardAgent(self.context)  # 守卫校验与防剧透
 
     def run_turn(self, db: Session, session_id: str, player_input: str, debug_emit: DebugEmitter | None = None) -> dict[str, Any]:
-        """与旧 KeeperAgent.run_turn 保持完全兼容的对外接口。"""
+        """执行一个完整的游戏回合（run_turn = 运行回合）。
+
+        【中文名称】运行回合
+
+        【功能说明】
+        这是 Supervisor 最重要的方法，也是外部调用的唯一入口。
+        接收玩家输入，调度 5 个 Agent 依次处理，最终返回包含叙事、
+        选项、状态变化等信息的字典。
+
+        【完整的 6 个阶段】
+        Phase 1: ContextAgent → 加载状态、解析意图、RAG 检索
+        Phase 2: PlannerAgent → 生成计划、校验白名单
+          （如果需要追问，跳到 _clarify_and_commit）
+        Phase 3: ExecutorAgent → 执行 Skill、规则检定
+        Phase 4: NarratorAgent → 生成叙事和选项
+        Phase 5: GuardAgent → 校验、自检、防剧透
+        Phase 5.5: Repair Loop → 最多 2 次修复循环
+        Phase 6: _commit_state → 写入数据库
+
+        【参数说明】
+        - db: Session → SQLAlchemy 数据库会话，用于查询和写入 PostgreSQL
+        - session_id: str → 游戏会话的唯一标识符
+        - player_input: str → 玩家输入的自然语言文本
+        - debug_emit: DebugEmitter | None → 调试事件发射器（可选）
+
+        【返回值】
+        - dict: 兼容旧版 KeeperState 的字典，包含：
+          - narration: 守秘人叙事文本
+          - options: 玩家可选行动列表
+          - state_delta: 状态变化
+          - discovered_clues: 新发现的线索
+          - skill_checks / sanity_checks: 检定结果
+          - 等等...
+        """
         emit_debug(debug_emit, phase="stream", name="supervisor", status="start", message="Supervisor 开始调度回合。")
 
         # === Phase 1: 加载上下文 ===
@@ -66,7 +175,7 @@ class KeeperSupervisor:
         plan_result = self.planner_agent.run(plan_envelope)
         plan = plan_result["payload"]
 
-        # 若需要澄清，直接构造澄清结果并落库
+        # 若需要追问，跳过后续 Phase，直接构造澄清结果并落库
         if plan["needs_clarification"]:
             emit_debug(debug_emit, phase="agent_node", name="Supervisor", status="success", message="玩家输入模糊，进入澄清分支。")
             return self._clarify_and_commit(
@@ -74,7 +183,7 @@ class KeeperSupervisor:
                 plan["turn_plan"], ctx["story_state"], debug_emit
             )
 
-        # === Phase 3: 执行计划 ===
+        # === Phase 3: 执行计划（Skill + 规则检定） ===
         exec_envelope = AgentMessage(
             payload={
                 "turn_plan": plan["turn_plan"],
@@ -95,7 +204,7 @@ class KeeperSupervisor:
         exec_result = self.executor_agent.run(exec_envelope)
         exec_data = exec_result["payload"]
 
-        # === Phase 4: 生成叙事 ===
+        # === Phase 4: 生成叙事（守秘人回应 + 状态增量） ===
         narr_envelope = AgentMessage(
             payload={
                 "visible_context": ctx["visible_context"],
@@ -119,7 +228,7 @@ class KeeperSupervisor:
         narr_result = self.narrator_agent.run(narr_envelope)
         narr_data = narr_result["payload"]
 
-        # === Phase 5: 校验与 Reflection ===
+        # === Phase 5: 校验与 Reflection（确定性校验 + 自检 + 防剧透） ===
         guard_envelope = AgentMessage(
             payload={
                 "narration": narr_data["narration"],
@@ -152,6 +261,11 @@ class KeeperSupervisor:
         guard_data = guard_result["payload"]
 
         # === Phase 5.5: Repair Loop（最多 2 次）===
+        # 当 GuardAgent 判定需要修复时，根据修复类型执行相应操作
+        # repair_text: 让 NarratorAgent 重新生成叙事
+        # repair_state_delta: 修复状态增量
+        # ask_clarification/fail_safe: 构造追问/兤底响应，不再继续修复
+        # replan_once: 重新规划一次
         repair_attempts = 0
         while guard_data["needs_repair"] and repair_attempts < 2:
             repair_attempts += 1
@@ -172,17 +286,18 @@ class KeeperSupervisor:
                 narr_result = self.narrator_agent.repair(repair_envelope)
                 narr_data = narr_result["payload"]
             elif repair_type == "repair_state_delta":
+                # 合并修复的状态增量并重新校验
                 merged = {**narr_data["state_delta"], **guard_data.get("repair_state_delta", {})}
                 validated_delta, _ = validate_state_delta(merged, ctx["story_state"])
                 narr_data = {**narr_data, "state_delta": validated_delta}
             elif repair_type in ("ask_clarification", "fail_safe"):
+                # 追问或兤底：构造固定响应，不再继续修复循环
                 narr_data["narration"] = guard_data["repair_instruction"] or "这个行动还需要更多明确目标。你可以说明想调查的对象、使用的物品或采取的方式。"
                 narr_data["options"] = ["说明具体目标", "换一种调查方式", "回顾已知线索", "自定义行动"]
                 narr_data["state_delta"] = {"clarification": True, "time_cost_minutes": 0, "danger_delta": 0}
-                # 一旦进入 clarify/fail_safe，不再继续 repair
-                break
+                break  # 一旦进入 clarify/fail_safe，不再继续修复
             elif repair_type == "replan_once":
-                # 重新规划一次
+                # 重新规划一次：重新调用 PlannerAgent
                 plan_envelope = AgentMessage(
                     payload={
                         "visible_context": ctx["visible_context"],
@@ -198,17 +313,18 @@ class KeeperSupervisor:
                         db, ctx["session"], ctx["character"], player_input, ctx["intent"],
                         plan["turn_plan"], ctx["story_state"], debug_emit
                     )
-                # 重新执行（简化：直接 break，避免无限递归）
+                # 简化处理：直接 break 避免无限递归
                 break
 
-            # 修复后重新 Guard
+            # 修复后重新 Guard 校验
             guard_envelope = AgentMessage(
-                payload={**guard_envelope["payload"], **narr_data}
+                payload={**guard_envelope["payload"], **narr_data}  # 用修复后的数据更新信封
             )
             guard_result = self.guard_agent.run(guard_envelope)
             guard_data = guard_result["payload"]
 
         # === Phase 6: 最终落库 ===
+        # 使用 GuardAgent 清洗后的安全叙事和校验后的状态增量
         emit_debug(debug_emit, phase="stream", name="supervisor", status="success", message="Supervisor 完成调度，准备落库。")
         return self._commit_state(
             db=db,
@@ -248,11 +364,39 @@ class KeeperSupervisor:
         story_state: dict[str, Any],
         debug_emit: DebugEmitter | None,
     ) -> dict[str, Any]:
-        """当计划判定需要澄清时，直接构造澄清问题并落库。"""
+        """处理追问回合（_clarify_and_commit = 追问并落库）。
+
+        【中文名称】追问并落库
+
+        【功能说明】
+        当 PlannerAgent 判定玩家输入太模糊、需要追问时调用。
+        不执行 Skill 和规则检定，直接构造一个追问问题作为叙事，
+        然后调用 _commit_state 落库。
+
+        【追问机制】
+        1. PlannerAgent 发现玩家输入模糊 → needs_clarification=True
+        2. Supervisor 调用 _clarify_and_commit
+        3. 生成追问问题（如"你想具体调查哪里？"）
+        4. 落库（不消耗游戏时间）
+        5. 下一轮 ContextAgent 会识别追问回合，正确理解玩家回答
+
+        【参数说明】
+        - db: 数据库会话
+        - session: 游戏会话对象
+        - character: 角色对象
+        - player_input: 玩家输入
+        - intent: 解析后的意图
+        - turn_plan: 回合计划（包含 clarification_question）
+        - story_state: 剧情状态
+        - debug_emit: 调试事件发射器
+
+        【返回值】
+        - dict: 兼容旧版 KeeperState 的字典
+        """
         question = turn_plan.get("clarification_question") or intent.get("clarification_question") or "你想具体调查哪里，或以什么方式行动？"
-        narration = str(question)
+        narration = str(question)  # 叙事就是追问问题
         options = ["检查附近明显可疑之处", "询问同伴的看法", "观察环境", "自定义行动"]
-        state_delta = {"clarification": True, "time_cost_minutes": 0, "danger_delta": 0}
+        state_delta = {"clarification": True, "time_cost_minutes": 0, "danger_delta": 0}  # 追问回合不消耗时间
 
         audit = {
             "意图": intent,
@@ -317,36 +461,83 @@ class KeeperSupervisor:
         image_scene_type: str,
         debug_emit: DebugEmitter | None,
     ) -> dict[str, Any]:
-        """唯一集中落库方法，保持与旧 agent.py commit_state 逻辑一致。"""
-        turn_index = len(session.turn_logs) + 1
-        discovered: list[models.Clue] = []
+        """唯一集中落库方法（_commit_state = 提交状态/保存存档）。
 
-        # 应用理智变化
+        【中文名称】提交状态 / 保存存档
+
+        【功能说明】
+        这是整个回合流程的最后一步。将本回合的所有结果写入数据库。
+        不管是正常回合还是追问回合，最终都通过这个方法落库。
+
+        【落库的 10 个步骤（按顺序）】
+        1. 应用理智变化 → 更新 character.san_current
+        2. 应用状态增量 → 更新地点、场景、时间、危险等级
+        3. 保存元数据 → 意图、裁定、审计记录写入 session.state
+        4. 处理线索发现 → 新线索写入 clues 表（自动去重）
+        5. 处理物品变化 → 物品增减写入 inventory_items 表
+        6. 更新线索计数器 → 用于判断是否给玩家线索提示
+        7. 生成会话摘要 → 用 LLM 生成摘要，维护长期记忆
+        8. 写 TurnLog → 记录本回合完整信息到 turn_logs 表
+        9. 写入向量记忆 → 将回合记忆写入 ChromaDB
+        10. 提交数据库事务 → db.commit()
+
+        【参数说明】
+        - db: 数据库会话
+        - session: 游戏会话对象
+        - character: 角色对象
+        - player_input: 玩家输入
+        - intent: 解析后的意图
+        - turn_plan: 回合计划
+        - plan_validation: 计划校验结果
+        - react_trace: ReAct 执行轨迹
+        - tool_observations: Tool 观察结果
+        - skill_results: Skill 执行结果
+        - reflection_report: Reflection 自检报告
+        - final_guardrail_report: 综合守卫报告
+        - adjudication: 规则裁定
+        - dice_results: 骰点结果
+        - skill_checks: 技能检定结果
+        - sanity_checks: 理智检定结果
+        - resolution: 综合裁定结果
+        - narration: 清洗后的安全叙事
+        - options: 清洗后的安全选项
+        - state_delta: 校验后的状态增量
+        - story_state: 剧情状态
+        - needs_image: 是否需要配图
+        - image_scene_type: 配图场景类型
+        - debug_emit: 调试事件发射器
+
+        【返回值】
+        - dict: 兼容旧版 KeeperState 的字典，供 API 层使用
+        """
+        turn_index = len(session.turn_logs) + 1  # 回合序号
+        discovered: list[models.Clue] = []  # 本回合发现的线索
+
+        # ===== 1. 应用理智变化 =====
         for san in sanity_checks:
-            character.san_current = int(san["san_after"])
+            character.san_current = int(san["san_after"])  # 更新角色当前理智值
 
-        # 应用状态增量
+        # ===== 2. 应用状态增量 =====
+        # 将 state_delta 合并到 session.state，更新地点、场景、时间、危险等级
         session.state = apply_turn_delta(
-            story_state,
-            state_delta,
-            session.current_location,
-            session.current_scene,
-            session.current_time,
+            story_state, state_delta,
+            session.current_location, session.current_scene, session.current_time,
         )
         scene_state = session.state.get("场景", {}) if isinstance(session.state.get("场景"), dict) else {}
         if isinstance(scene_state.get("当前地点"), str) and scene_state["当前地点"]:
-            session.current_location = scene_state["当前地点"][:200]
+            session.current_location = scene_state["当前地点"][:200]  # 更新地点（截断）
         if isinstance(scene_state.get("当前场景"), str) and scene_state["当前场景"]:
-            session.current_scene = scene_state["当前场景"][:200]
-        session.current_time = session.state.get("场景", {}).get("当前时间", session.current_time)
-        session.danger_level = int(session.state.get("剧情", {}).get("敌对势力警觉", session.danger_level))
+            session.current_scene = scene_state["当前场景"][:200]  # 更新场景（截断）
+        session.current_time = session.state.get("场景", {}).get("当前时间", session.current_time)  # 更新时间
+        session.danger_level = int(session.state.get("剧情", {}).get("敌对势力警觉", session.danger_level))  # 更新危险等级
 
-        # 保存元数据
+        # ===== 3. 保存元数据 =====
+        # 将本回合的关键数据保存到 session.state，供调试和回溯使用
         session.state = {
             **session.state,
-            "last_intent": intent,
-            "last_delta": state_delta,
-            "last_audit": {
+            "last_intent": intent,  # 最后意图
+            "last_delta": state_delta,  # 最后状态增量
+            "last_audit": {  # 审计记录
                 "意图": intent,
                 "裁定": adjudication,
                 "偏离剧情": resolution.get("偏离剧情", {}),
@@ -360,15 +551,16 @@ class KeeperSupervisor:
                 "状态校验": final_guardrail_report.get("validation", {}),
                 "防剧透": final_guardrail_report.get("leak", {}),
             },
-            "last_options": options,
-            "last_turn_plan": turn_plan,
-            "last_react_trace": react_trace,
-            "last_tool_observations": tool_observations,
-            "last_reflection_report": reflection_report,
-            "last_final_guardrail_report": final_guardrail_report,
+            "last_options": options,  # 最后选项
+            "last_turn_plan": turn_plan,  # 最后回合计划
+            "last_react_trace": react_trace,  # 最后 ReAct 轨迹
+            "last_tool_observations": tool_observations,  # 最后 Tool 观察
+            "last_reflection_report": reflection_report,  # 最后 Reflection 报告
+            "last_final_guardrail_report": final_guardrail_report,  # 最后守卫报告
         }
 
-        # 处理线索
+        # ===== 4. 处理线索发现 =====
+        # 将 LLM 生成的线索写入数据库（去重：已存在的线索不重复创建）
         for clue_payload in state_delta.get("generated_clues", []):
             if not isinstance(clue_payload, dict):
                 continue
@@ -377,7 +569,7 @@ class KeeperSupervisor:
                 models.Clue.session_id == session.id, models.Clue.clue_key == clue_key
             ).one_or_none()
             if existing:
-                discovered.append(existing)
+                discovered.append(existing)  # 已存在的线索直接引用
                 continue
             clue = models.Clue(
                 session_id=session.id,
@@ -391,16 +583,18 @@ class KeeperSupervisor:
             db.add(clue)
             discovered.append(clue)
 
-        # 处理物品变化
+        # ===== 5. 处理物品变化 =====
         inventory_results = apply_inventory_changes(db, session, state_delta.get("inventory_changes", []), turn_index)
         if inventory_results.get("applied") or inventory_results.get("ignored"):
             state_delta["inventory_results"] = inventory_results
             session.state["last_inventory_changes"] = inventory_results
 
-        # 更新线索计数器
+        # ===== 6. 更新线索计数器 =====
+        # 用于判断是否应该给玩家提供线索提示
         update_no_clue_counter(session.state, bool(discovered))
 
-        # 生成并应用会话摘要
+        # ===== 7. 生成并应用会话摘要 =====
+        # 摘要用于维护会话的长期记忆，避免上下文过长
         summary_state = {
             "player_input": player_input,
             "narration": narration,
@@ -410,7 +604,8 @@ class KeeperSupervisor:
         summary = build_turn_summary(session, summary_state, self.llm)
         apply_summary_to_session(session, summary_state, summary)
 
-        # 写 TurnLog
+        # ===== 8. 写 TurnLog =====
+        # 记录本回合的完整信息，供调试和回溯使用
         log = models.TurnLog(
             session_id=session.id,
             turn_index=turn_index,
@@ -445,9 +640,10 @@ class KeeperSupervisor:
         )
         db.add(log)
 
-        # 写入向量记忆
+        # ===== 9. 写入向量记忆 =====
+        # 将本回合的关键信息写入 ChromaDB，供后续回合的 RAG 检索使用
         memory_chunks: list[DocumentChunk] = []
-        mem_chunk = build_session_memory_chunk(session.id, turn_index, {
+        mem_chunk = build_session_memory_chunk(session.id, turn_index, {  # 回合记忆
             "player_input": player_input,
             "narration": narration,
             "state_delta": state_delta,
@@ -455,20 +651,21 @@ class KeeperSupervisor:
         })
         if mem_chunk:
             memory_chunks.append(mem_chunk)
-        summary_chunk = build_summary_memory_chunk(session.id, turn_index, summary)
+        summary_chunk = build_summary_memory_chunk(session.id, turn_index, summary)  # 摘要记忆
         if summary_chunk:
             memory_chunks.append(summary_chunk)
         if memory_chunks:
             self.retrieval.upsert_chunks("session_memory_chunks", memory_chunks)
 
+        # ===== 10. 提交数据库事务 =====
         db.commit()
-        db.refresh(session)
+        db.refresh(session)  # 刷新会话对象
         for clue in discovered:
-            db.refresh(clue)
+            db.refresh(clue)  # 刷新线索对象
 
         emit_debug(debug_emit, phase="agent_node", name="commit_state", status="success", message="状态已落库。", metadata={"session_id": session.id, "turn_index": turn_index})
 
-        # 返回兼容旧 KeeperState 的字典
+        # 返回兼容旧 KeeperState 的字典，供 API 层使用
         return {
             "db": db,
             "session_id": session.id,

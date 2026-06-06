@@ -1,15 +1,22 @@
 import type { ActionResponse, ActionStreamEvent, AssistantChatResponse, AssistantMode, AssistantStreamEvent, Character, GameSession } from './types';
 
-// 【阅读顺序 2：前端 API 封装】
+// =============================================================================
+// 【前端 API 封装层】
+// =============================================================================
 // 这个文件是浏览器和后端之间的“翻译层”：
 // 1. App.tsx 不直接写 fetch URL，而是调用这里的 api.characters / api.streamAction 等方法。
 // 2. 这里统一拼接 /api 路径、设置 JSON 请求头、解析错误。
 // 3. 对流式接口，streamRequest 会一行一行读取后端返回的 NDJSON 事件。
+// =============================================================================
 const apiBase = `${import.meta.env.BASE_URL.replace(/\/$/, '')}/api`;
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  // 普通 JSON 请求封装：统一补充请求头，并把后端错误转换成 Error。
-  // T 是 TypeScript 泛型，用来告诉调用方“这次请求成功后会返回什么类型的数据”。
+  /** 普通 JSON 请求封装（request = 请求）。
+   *
+   * 【中文名称】请求
+   * 【功能说明】统一补充请求头，发送 fetch 请求，把后端错误转换成 Error 抛出。
+   * T 是 TypeScript 泛型，用来告诉调用方“这次请求成功后会返回什么类型的数据”。
+   */
   const response = await fetch(url, {
     headers: { 'Content-Type': 'application/json', ...(options?.headers ?? {}) },
     ...options
@@ -22,7 +29,11 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 function parseErrorMessage(detail: string, status: number): string {
-  // FastAPI 通常把业务错误放在 detail 字段；解析失败时保留原始响应文本。
+  /** 解析错误消息（parseErrorMessage = 解析错误消息）。
+   *
+   * 【中文名称】解析错误消息
+   * 【功能说明】FastAPI 通常把业务错误放在 detail 字段；解析失败时保留原始响应文本。
+   */
   if (!detail) return `请求失败，状态码：${status}`;
   try {
     const payload = JSON.parse(detail) as { detail?: unknown };
@@ -67,19 +78,23 @@ export const api = {
 };
 
 export interface AssistantChatPayload {
-  session_id?: string | null;
-  message: string;
-  mode?: AssistantMode;
-  enable_mqe?: boolean;
-  mqe_expansions?: number;
-  enable_hyde?: boolean | null;
-  top_k?: number;
-  candidate_pool_multiplier?: number;
+  session_id?: string | null;        // 当前会话 ID（可选，绑定会话时可检索会话记忆）
+  message: string;                   // 玩家问题
+  mode?: AssistantMode;              // 助手模式（auto/rules/session_help）
+  enable_mqe?: boolean;              // 是否启用 MQE 查询扩展
+  mqe_expansions?: number;           // MQE 扩展查询数量
+  enable_hyde?: boolean | null;       // 是否启用 HyDE（null=自动）
+  top_k?: number;                    // 检索结果数量
+  candidate_pool_multiplier?: number; // 候选池倍数
 }
 
 async function streamRequest<TEvent>(url: string, options: RequestInit, onEvent: (event: TEvent) => void): Promise<void> {
-  // 流式接口使用 NDJSON：每收到一行 JSON 就立即通知页面更新叙事文本。
-  // 对 Web 初学者来说，可以把它理解为“边下载边解析”，不用等整段守秘人回复全部生成完。
+  /** 流式请求（streamRequest = 流式请求）。
+   *
+   * 【中文名称】流式请求
+   * 【功能说明】使用 NDJSON 格式边下载边解析，每收到一行 JSON 就立即回调 onEvent。
+   * 对 Web 初学者来说，可以把它理解为“边下载边解析”，不用等整段回复全部生成完。
+   */
   const response = await fetch(url, {
     headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
     ...options

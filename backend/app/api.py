@@ -28,9 +28,9 @@ from app.utils import resolve_project_path
 # 2. FastAPI 根据下面的 @router.get / @router.post 找到对应函数。
 # 3. 普通接口直接返回 JSON；流式接口用 StreamingResponse 持续返回 NDJSON。
 # 4. 真正的守秘人推理在 KeeperSupervisor.run_turn，也就是 backend/app/services/agents/supervisor.py。
-router = APIRouter(prefix="/api")
-_agent: KeeperSupervisor | None = None
-_assistant_agent: GameAssistantAgent | None = None
+router = APIRouter(prefix="/api")  # router = 路由：FastAPI 路由对象，所有API端点注册在此
+_agent: KeeperSupervisor | None = None  # _agent = 守秘人调度器单例：进程内复用，避免重复初始化LLM和检索服务
+_assistant_agent: GameAssistantAgent | None = None  # _assistant_agent = 游戏助手单例：进程内复用
 
 
 def get_agent() -> KeeperSupervisor:

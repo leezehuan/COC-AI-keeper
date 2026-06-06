@@ -6,28 +6,33 @@ from app.services.dice import sanity_check, skill_check
 
 @dataclass
 class RequiredCheck:
-    kind: str
-    skill: str
-    skill_value: int
-    difficulty: str = "常规"
-    reason: str = "行动存在不确定性，需要检定。"
+    """必须执行的检定（RequiredCheck = 必须检定）。描述一次具体的检定需求。"""
+    kind: str  # kind = 检定类型：如 "技能"、"属性"、"理智"
+    skill: str  # skill = 检定技能名：如 "侦查"、"力量"
+    skill_value: int  # skill_value = 技能数值：如 60
+    difficulty: str = "常规"  # difficulty = 难度等级：常规/困难/极难
+    reason: str = "行动存在不确定性，需要检定。"  # reason = 检定原因
 
 
 @dataclass
 class RuleAdjudication:
-    needs_roll: bool
-    skill: str
-    skill_value: int
-    difficulty: str
-    needs_sanity: bool
-    time_cost_minutes: int
-    risk_level: int
-    required_checks: list[RequiredCheck] = field(default_factory=list)
-    consequences: dict[str, Any] = field(default_factory=dict)
-    reason: str = "根据行动类型和当前场景进行轻量裁定。"
+    """规则裁定（RuleAdjudication = 规则裁定）。综合判断玩家行动需要哪些检定。"""
+    needs_roll: bool  # needs_roll = 是否需要掷骰
+    skill: str  # skill = 使用技能
+    skill_value: int  # skill_value = 技能值
+    difficulty: str  # difficulty = 难度
+    needs_sanity: bool  # needs_sanity = 是否需要理智检定
+    time_cost_minutes: int  # time_cost_minutes = 预计耗时（分钟）
+    risk_level: int  # risk_level = 风险等级 1-5
+    required_checks: list[RequiredCheck] = field(default_factory=list)  # required_checks = 必须执行的检定列表
+    consequences: dict[str, Any] = field(default_factory=dict)  # consequences = 成功/失败的后果描述
+    reason: str = "根据行动类型和当前场景进行轻量裁定。"  # reason = 裁定依据
 
 
-def adjudicate_action(
+def adjudicate_action(  # adjudicate_action = 裁定行动
+    # 【中文名称】裁定行动
+    # 【功能说明】根据玩家意图和场景上下文裁定需要哪些检定。
+
     message: str,
     intent: dict[str, Any],
     character_skills: dict[str, Any],
@@ -66,6 +71,7 @@ def adjudicate_action(
 
 
 def execute_rule_tools(adjudication: dict[str, Any], current_san: int) -> dict[str, list[dict[str, Any]]]:
+    """执行规则检定（execute_rule_tools = 执行规则检定）。根据裁定结果实际掷骰，返回技能检定和理智检定的结果。"""
     dice_results: list[dict[str, Any]] = []
     skill_checks: list[dict[str, Any]] = []
     sanity_checks: list[dict[str, Any]] = []
@@ -85,6 +91,7 @@ def execute_rule_tools(adjudication: dict[str, Any], current_san: int) -> dict[s
 
 
 def normalize_skill_name(skill: str) -> str:
+    """规范化技能名（normalize_skill_name = 规范化技能名）。将简称映射为完整技能名，如"射击"→"射击（手枪）"。"""
     aliases = {"射击": "射击（手枪）", "驾驶": "驾驶（船）", "科学": "博物学", "": "侦查"}
     return aliases.get(skill, skill)
 
@@ -96,6 +103,7 @@ def resolve_check_target(
     character_attributes: dict[str, Any],
     luck: int,
 ) -> tuple[str, int, str]:
+    """解析检定目标（resolve_check_target = 解析检定目标）。根据请求技能和玩家输入，确定实际使用的技能/属性和数值。"""
     skill = normalize_skill_name(requested)
     inferred_attribute = infer_attribute_from_message(message)
     if inferred_attribute and (skill in {"", "侦查"} or skill not in character_skills):
@@ -109,6 +117,7 @@ def resolve_check_target(
 
 
 def normalize_attribute_name(value: str) -> str:
+    """规范化属性名（normalize_attribute_name = 规范化属性名）。将中文属性名映射为标准缩写，如"力量"→"STR"。"""
     normalized = value.strip()
     aliases = {
         "力量": "STR",
@@ -145,6 +154,7 @@ def normalize_attribute_name(value: str) -> str:
 
 
 def infer_attribute_from_message(message: str) -> str:
+    """从玩家输入推断属性（infer_attribute_from_message = 推断属性）。根据关键词匹配推断玩家想用哪个属性，如"推开"→STR。"""
     mapping = [
         (["推开", "举起", "搬开", "撬开", "破门", "强行"], "STR"),
         (["毒", "疾病", "寒冷", "忍耐", "屏息"], "CON"),
@@ -163,6 +173,7 @@ def infer_attribute_from_message(message: str) -> str:
 
 
 def attribute_value(character_attributes: dict[str, Any], attribute: str, luck: int) -> int:
+    """获取属性数值（attribute_value = 属性值）。从角色属性字典中提取指定属性的数值，Luck特殊处理。"""
     core = character_attributes.get("核心属性", {}) if isinstance(character_attributes, dict) else {}
     if attribute == "Luck":
         luck_value = character_attributes.get("Luck") or as_attribute_number(core.get("Luck")) or luck or 50
@@ -172,6 +183,7 @@ def attribute_value(character_attributes: dict[str, Any], attribute: str, luck: 
 
 
 def as_attribute_number(value: Any) -> int | None:
+    """提取属性数值（as_attribute_number = 提取属性数值）。从可能嵌套的字典中提取数值，如{"简单鉴定": 50}→50。"""
     if isinstance(value, dict):
         value = value.get("简单鉴定", value.get("全值"))
     if isinstance(value, (int, float)):
@@ -183,6 +195,7 @@ def as_attribute_number(value: Any) -> int | None:
 
 
 def format_attribute_name(attribute: str) -> str:
+    """格式化属性名（format_attribute_name = 格式化属性名）。将缩写转为中文显示名，如"STR"→"力量"。"""
     names = {
         "STR": "力量",
         "CON": "体质",
@@ -198,6 +211,7 @@ def format_attribute_name(attribute: str) -> str:
 
 
 def needs_skill_roll(message: str, action_type: str, intent: dict[str, Any]) -> bool:
+    """判断是否需要技能检定（needs_skill_roll = 是否需要技能检定）。根据行动类型和关键词判断。"""
     if intent.get("is_meta"):
         return False
     check_words = ["仔细", "搜索", "寻找", "检查", "追踪", "修", "开锁", "说服", "攻击", "射击", "潜行", "医学", "急救", "估价", "辨认", "强行", "偷偷", "推开", "举起", "破门", "跳", "躲", "抵抗", "灵感", "回忆", "碰运气"]
@@ -206,11 +220,13 @@ def needs_skill_roll(message: str, action_type: str, intent: dict[str, Any]) -> 
 
 
 def needs_sanity_check(message: str, context: list[dict[str, Any]]) -> bool:
+    """判断是否需要理智检定（needs_sanity_check = 是否需要理智检定）。根据恐怖关键词判断。"""
     text = message + "\n" + "\n".join(str(item.get("document", ""))[:300] for item in context[:2])
     return any(word in text for word in ["尸体", "血淋淋", "怪物", "理智检定", "理智损失", "幼徒", "深潜者", "恐怖"])
 
 
 def infer_difficulty(message: str, context: list[dict[str, Any]]) -> str:
+    """推断难度等级（infer_difficulty = 推断难度）。根据环境和行动关键词判断常规/困难/极难。"""
     text = message + "\n" + "\n".join(str(item.get("document", ""))[:300] for item in context[:2])
     if any(word in text for word in ["极难", "几乎不可能", "暴风雨中", "完全黑暗"]):
         return "极难"
@@ -220,6 +236,7 @@ def infer_difficulty(message: str, context: list[dict[str, Any]]) -> str:
 
 
 def infer_time_cost(message: str, action_type: str, needs_roll: bool) -> int:
+    """推断耗时（infer_time_cost = 推断耗时）。根据行动类型和关键词估算消耗分钟数。"""
     if any(word in message for word in ["快速", "立刻", "马上", "冲"]):
         return 1
     if action_type == "移动":
@@ -230,6 +247,7 @@ def infer_time_cost(message: str, action_type: str, needs_roll: bool) -> int:
 
 
 def infer_risk_level(message: str, action_type: str, needs_sanity: bool) -> int:
+    """推断风险等级（infer_risk_level = 推断风险等级）。根据行动类型和关键词估算风险 1-5。"""
     risk = 1
     if action_type == "战斗":
         risk += 2
@@ -241,6 +259,7 @@ def infer_risk_level(message: str, action_type: str, needs_sanity: bool) -> int:
 
 
 def as_adjudication_dict(adjudication: RuleAdjudication) -> dict[str, Any]:
+    """裁定转为字典（as_adjudication_dict = 裁定转字典）。将 RuleAdjudication 转为可 JSON 序列化的字典。"""
     payload = asdict(adjudication)
     payload["required_checks"] = [asdict(item) for item in adjudication.required_checks]
     return payload

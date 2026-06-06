@@ -8,6 +8,7 @@ from app.services.skills import SKILL_SPECS, choose_skill_name
 
 
 def format_context(rows: list[dict[str, Any]]) -> str:
+    """格式化上下文（format_context = 格式化上下文）。将检索结果列表转为LLM可读的文本块。"""
     parts = []
     for row in rows:
         metadata = row.get("metadata") or {}
@@ -17,6 +18,7 @@ def format_context(rows: list[dict[str, Any]]) -> str:
 
 
 def format_inventory(items: list[models.InventoryItem]) -> str:
+    """格式化物品栏（format_inventory = 格式化物品栏）。将物品列表转为可读文本。"""
     if not items:
         return "暂无物品。"
     parts: list[str] = []
@@ -27,6 +29,7 @@ def format_inventory(items: list[models.InventoryItem]) -> str:
 
 
 def filter_player_visible_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """过滤玩家可见行（filter_player_visible_rows = 过滤可见行）。移除标记为"主持人秘密"的内容。"""
     visible: list[dict[str, Any]] = []
     for row in rows:
         metadata = row.get("metadata") or {}
@@ -37,6 +40,7 @@ def filter_player_visible_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any
 
 
 def filter_player_visible_location_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """过滤玩家可见地点（filter_player_visible_location_rows = 过滤可见地点）。只保留entity_type为"地点"且非秘密的实体。"""
     visible: list[dict[str, Any]] = []
     for row in rows:
         metadata = row.get("metadata") or {}
@@ -49,6 +53,7 @@ def filter_player_visible_location_rows(rows: list[dict[str, Any]]) -> list[dict
 
 
 def format_location_names(rows: list[dict[str, Any]]) -> str:
+    """格式化地点名列表（format_location_names = 格式化地点名）。将地点实体列表转为"、".join的字符串。"""
     names: list[str] = []
     for row in rows:
         metadata = row.get("metadata") or {}
@@ -59,6 +64,7 @@ def format_location_names(rows: list[dict[str, Any]]) -> str:
 
 
 def build_session_memory_chunk(session_id: str, turn_index: int, state: dict[str, Any]) -> DocumentChunk | None:
+    """构建会话记忆块（build_session_memory_chunk = 构建记忆块）。将回合数据打包为可存入ChromaDB的DocumentChunk。"""
     narration = state.get("narration", "").strip()
     player_input = state.get("player_input", "").strip()
     if not narration and not player_input:
@@ -93,6 +99,7 @@ def build_session_memory_chunk(session_id: str, turn_index: int, state: dict[str
 
 
 def ensure_options(value: Any) -> list[str]:
+    """确保选项列表有效（ensure_options = 确保选项）。去重、限制5个、追加"自定义行动"。"""
     if not isinstance(value, list):
         return default_options()
     options: list[str] = []
@@ -111,6 +118,7 @@ def ensure_options(value: Any) -> list[str]:
 
 
 def normalize_option(value: Any) -> str:
+    """规范化选项文本（normalize_option = 规范化选项）。从字典或字符串中提取选项文本。"""
     if isinstance(value, dict):
         for key in ["action", "label", "title", "name", "description"]:
             option = str(value.get(key) or "").strip()
@@ -126,6 +134,7 @@ def normalize_option(value: Any) -> str:
 
 
 def extract_option_from_mapping_text(value: str) -> str:
+    """从映射文本提取选项（extract_option_from_mapping_text = 提取选项）。从类似字典的字符串中提取选项值。"""
     for key in ["action", "label", "title", "name", "description"]:
         marker = f"'{key}':"
         if marker not in value:
@@ -145,10 +154,12 @@ def extract_option_from_mapping_text(value: str) -> str:
 
 
 def default_options() -> list[str]:
+    """默认选项列表（default_options = 默认选项）。当LLM未生成选项时使用的兜底选项。"""
     return ["继续搜索附近", "观察周围环境", "询问同伴看法", "检查角色状态", "自定义行动"]
 
 
 def available_tool_names() -> list[str]:
+    """可用Tool名称列表（available_tool_names = 可用Tool列表）。系统支持的所有Tool白名单。"""
     return [
         "ContextSearchTool",
         "RuleCheckTool",
@@ -160,6 +171,7 @@ def available_tool_names() -> list[str]:
 
 
 def fallback_turn_plan(state: dict[str, Any]) -> dict[str, Any]:
+    """回退回合计划（fallback_turn_plan = 回退计划）。LLM生成计划失败时使用的默认计划。"""
     intent = state.get("intent") or heuristic_intent(state.get("player_input", ""))
     action_type = str(intent.get("action_type") or infer_action_type(state.get("player_input", "")))
     skill_name = choose_skill_name(action_type)
@@ -183,6 +195,7 @@ def fallback_turn_plan(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_turn_plan(value: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    """规范化回合计划（normalize_turn_plan = 规范化计划）。确保计划所有字段完整，缺失字段用回退值填充。"""
     if not isinstance(value, dict):
         value = {}
     plan = {**fallback, **{key: item for key, item in value.items() if item is not None}}
@@ -197,6 +210,7 @@ def normalize_turn_plan(value: dict[str, Any], fallback: dict[str, Any]) -> dict
 
 
 def normalize_plan_intent(intent: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    """规范化计划意图（normalize_plan_intent = 规范化意图）。合并意图和计划中的action_type等信息。"""
     normalized = dict(intent or {})
     if plan.get("action_type"):
         normalized["action_type"] = str(plan.get("action_type"))
@@ -208,6 +222,7 @@ def normalize_plan_intent(intent: dict[str, Any], plan: dict[str, Any]) -> dict[
 
 
 def ensure_list(value: Any) -> list[Any]:
+    """确保为列表（ensure_list = 确保列表）。将非列表值包装为列表，None返回空列表。"""
     if isinstance(value, list):
         return value
     if value in (None, ""):
@@ -216,6 +231,7 @@ def ensure_list(value: Any) -> list[Any]:
 
 
 def to_int(value: Any, default: int) -> int:
+    """安全转整数（to_int = 转为整数）。转换失败时返回默认值。"""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -223,10 +239,12 @@ def to_int(value: Any, default: int) -> int:
 
 
 def clamp_int(value: int, minimum: int, maximum: int) -> int:
+    """限制整数范围（clamp_int = 限制范围）。将value限制在[minimum, maximum]区间内。"""
     return max(minimum, min(maximum, value))
 
 
 def apply_rule_observation_to_state(state: dict[str, Any], observations: list[dict[str, Any]]) -> None:
+    """应用规则观察结果到状态（apply_rule_observation_to_state = 应用规则结果）。从Tool观察中提取RuleCheckTool的裁定和检定数据。"""
     for observation in observations:
         if observation.get("tool") != "RuleCheckTool":
             continue
@@ -239,6 +257,7 @@ def apply_rule_observation_to_state(state: dict[str, Any], observations: list[di
 
 
 def summarize_turn_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    """摘要回合计划（summarize_turn_plan = 摘要计划）。提取计划的关键字段用于调试。"""
     return {
         "goal": plan.get("goal", ""),
         "action_type": plan.get("action_type", ""),
@@ -249,6 +268,7 @@ def summarize_turn_plan(plan: dict[str, Any]) -> dict[str, Any]:
 
 
 def should_offer_clue_hint(state: dict[str, Any]) -> bool:
+    """判断是否应提示线索（should_offer_clue_hint = 是否提示线索）。连续4回合无新线索时提示。"""
     generated_clues = state.get("state_delta", {}).get("generated_clues", [])
     if isinstance(generated_clues, list) and generated_clues:
         return False
@@ -258,6 +278,7 @@ def should_offer_clue_hint(state: dict[str, Any]) -> bool:
 
 
 def update_no_clue_counter(session_state: dict[str, Any], has_new_clue: bool) -> None:
+    """更新无新线索计数器（update_no_clue_counter = 更新线索计数）。有新线索时归零，否则+1。"""
     memory = session_state.setdefault("记忆", {})
     if has_new_clue:
         memory["连续无新线索回合"] = 0
@@ -266,6 +287,7 @@ def update_no_clue_counter(session_state: dict[str, Any], has_new_clue: bool) ->
 
 
 def summarize_skill_outcome(checks: list[dict[str, Any]]) -> str:
+    """摘要技能检定结果（summarize_skill_outcome = 摘要技能结果）。生成技能检定的可读摘要。"""
     if not checks:
         return "没有技能检定。"
     check = checks[-1]
@@ -273,6 +295,7 @@ def summarize_skill_outcome(checks: list[dict[str, Any]]) -> str:
 
 
 def summarize_sanity_outcome(checks: list[dict[str, Any]]) -> str:
+    """摘要理智检定结果（summarize_sanity_outcome = 摘要理智结果）。生成理智检定的可读摘要。"""
     if not checks:
         return "没有理智检定。"
     check = checks[-1]
@@ -280,6 +303,7 @@ def summarize_sanity_outcome(checks: list[dict[str, Any]]) -> str:
 
 
 def fallback_response(state: dict[str, Any]) -> dict[str, Any]:
+    """回退响应（fallback_response = 回退响应）。LLM生成叙事失败时使用的兜底叙事和选项。"""
     session = state.get("session")
     current_location = getattr(session, "current_location", "未知地点") if session else "未知地点"
     skill_text = ""
@@ -302,6 +326,7 @@ def fallback_response(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def heuristic_intent(message: str) -> dict[str, Any]:
+    """启发式意图解析（heuristic_intent = 启发式意图）。用关键词匹配解析玩家意图，LLM失败时使用。"""
     target = ""
     for marker in ["检查", "调查", "查看", "观察", "搜索", "询问", "前往", "进入"]:
         if marker in message:
@@ -320,6 +345,7 @@ def heuristic_intent(message: str) -> dict[str, Any]:
 
 
 def infer_action_type(message: str) -> str:
+    """推断行动类型（infer_action_type = 推断行动类型）。根据关键词判断社交/移动/战斗/调查。"""
     if any(word in message for word in ["问", "询问", "交谈", "说服"]):
         return "社交"
     if any(word in message for word in ["去", "前往", "进入", "离开"]):
@@ -330,6 +356,7 @@ def infer_action_type(message: str) -> str:
 
 
 def infer_skill(message: str) -> str:
+    """推断使用技能（infer_skill = 推断技能）。根据关键词匹配推断玩家想使用的技能，默认返回"侦查"。"""
     mapping = [
         (["听", "声音"], "聆听"),
         (["脚印", "追踪", "跟踪"], "追踪"),
@@ -351,5 +378,6 @@ def infer_skill(message: str) -> str:
 
 
 def normalize_skill(skill: str) -> str:
+    """规范化技能名（normalize_skill = 规范化技能）。将简称映射为完整技能名，如"射击"→"射击（手枪）"。"""
     aliases = {"射击": "射击（手枪）", "驾驶": "驾驶（船）", "科学": "博物学"}
     return aliases.get(skill, skill or "侦查")

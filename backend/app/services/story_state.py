@@ -6,20 +6,38 @@ from typing import Any
 
 from app.utils import safe_key
 
-# 【阅读顺序 6：剧情状态结构】
-# 这个文件负责把 LangGraph 每回合产生的 state_delta 写入长期 story_state。
+# =============================================================================
+# 【剧情状态管理 story_state】
+# =============================================================================
+# 这个文件负责管理游戏的长期剧情状态（story_state）。
 # 初学者可以这样理解：
 # 1. agent.py 负责“本回合怎么判断、怎么叙事”。
 # 2. story_state.py 负责“本回合结束后，游戏世界状态应该怎么变”。
 # 3. ensure_story_state 保证存档结构完整，build_turn_delta 构造变化，apply_turn_delta 真正合并变化。
+# =============================================================================
 
 
 STATE_VERSION = 1
 
 
 def ensure_story_state(raw_state: dict[str, Any] | None, current_location: str, current_scene: str, current_time: str) -> dict[str, Any]:
-    # 将旧会话或空会话状态补齐为统一结构，后续状态更新都依赖这些固定分区。
-    # 【状态流程 1】每次读写剧情状态前都先调用它，确保“剧情/场景/记忆/秘密”四个分区存在。
+    """确保剧情状态结构完整（ensure_story_state = 确保剧情状态）。
+
+    【中文名称】确保剧情状态
+
+    【功能说明】
+    将旧会话或空会话状态补齐为统一结构。每次读写剧情状态前都先调用它，
+    确保“剧情/场景/记忆/秘密”四个分区存在且所有必要字段都有默认值。
+
+    【参数说明】
+    - raw_state: 原始状态字典（可为 None）
+    - current_location: 当前地点
+    - current_scene: 当前场景
+    - current_time: 当前时间
+
+    【返回值】
+    - dict: 结构完整的剧情状态字典
+    """
     state = deepcopy(raw_state or {})
     state.setdefault("版本", STATE_VERSION)
     state.setdefault("剧情", {})

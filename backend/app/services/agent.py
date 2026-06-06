@@ -1,3 +1,18 @@
+# 【agent.py：旧版 LangGraph 守秘人核心（已废弃，保留参考）】
+#
+# 重要说明：当前项目已迁移到多 Agent 架构（agents/supervisor.py），
+# KeeperAgent 现在只是 KeeperSupervisor 的向后兼容壳。
+# 本文件中的 _OldKeeperAgent 是旧版 LangGraph 实现，保留供参考。
+#
+# 旧版架构（LangGraph StateGraph）：
+# - 所有节点共享 KeeperState 字典
+# - 节点按线性顺序执行，通过条件分支处理追问
+# - 修复循环通过 repair_or_replan 节点实现
+#
+# 新版架构（多 Agent Supervisor）：
+# - 各 Agent 通过 AgentMessage 信封传递数据
+# - Supervisor 负责组装信封并路由
+# - 修复循环在 Supervisor 中实现
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -38,62 +53,83 @@ from app.utils import safe_key
 # 6. generate_next_options -> commit_state：理解最终如何落库并返回给前端。
 # LangGraph 的核心思想：每个节点都是一个函数，输入 state，补充/修改 state，再交给下一个节点。
 class KeeperState(TypedDict, total=False):
-    # LangGraph 在各节点之间传递的共享状态，包含数据库对象、检索上下文和本回合产物。
-    # 对初学者来说，可以把它看成“本回合的工作台”：每个节点都把自己的结果放到这里。
-    db: Session
-    session_id: str
-    player_input: str
-    session: models.GameSession
-    character: models.Character
-    intent: dict[str, Any]
-    scenario_context: list[dict[str, Any]]
-    rule_context: list[dict[str, Any]]
-    entity_context: list[dict[str, Any]]
-    clue_context: list[dict[str, Any]]
-    memory_context: list[dict[str, Any]]
-    adjudication: dict[str, Any]
-    dice_results: list[dict[str, Any]]
-    skill_checks: list[dict[str, Any]]
-    sanity_checks: list[dict[str, Any]]
-    divergence: dict[str, Any]
-    resolution: dict[str, Any]
-    generated_payload: dict[str, Any]
-    narration: str
-    options: list[str]
-    state_delta: dict[str, Any]
-    story_state: dict[str, Any]
-    validation_report: dict[str, Any]
-    leak_report: dict[str, Any]
-    audit: dict[str, Any]
-    summary: dict[str, Any]
-    discovered_clues: list[models.Clue]
-    needs_clarification: bool
-    visible_context: dict[str, Any]
-    keeper_only_context: dict[str, Any]
-    turn_plan: dict[str, Any]
-    plan_validation: dict[str, Any]
-    react_trace: list[dict[str, Any]]
-    tool_observations: list[dict[str, Any]]
-    skill_results: list[dict[str, Any]]
-    plan_gap: bool
-    reflection_report: dict[str, Any]
-    repair_attempts: int
-    final_guardrail_report: dict[str, Any]
-    debug_emit: DebugEmitter
-    needs_image: bool
-    image_scene_type: str
-    image_url: str | None
-    image_prompt_raw: str
-    image_prompt_optimized: str
-    image_metadata: dict[str, Any]
+    """LangGraph 在各节点之间传递的共享状态字典。
+
+    这是旧版架构的核心数据结构，每个节点都读取和修改这个字典。
+    新版架构中，各 Agent 通过 AgentMessage.payload 传递各自需要的数据。
+    """
+    # 数据库与输入
+    db: Session                     # 数据库会话
+    session_id: str                 # 游戏会话 ID
+    player_input: str               # 玩家输入文本
+    session: models.GameSession     # 游戏会话 ORM 对象
+    character: models.Character     # 角色 ORM 对象
+    intent: dict[str, Any]          # 结构化意图
+    # RAG 检索结果
+    scenario_context: list[dict[str, Any]]  # 剧本检索结果
+    rule_context: list[dict[str, Any]]     # 规则检索结果
+    entity_context: list[dict[str, Any]]   # 实体检索结果
+    clue_context: list[dict[str, Any]]     # 线索检索结果
+    memory_context: list[dict[str, Any]]   # 记忆检索结果
+    # 规则检定结果
+    adjudication: dict[str, Any]           # 规则裁定结果
+    dice_results: list[dict[str, Any]]     # 骰点结果
+    skill_checks: list[dict[str, Any]]    # 技能检定结果
+    sanity_checks: list[dict[str, Any]]   # 理智检定结果
+    divergence: dict[str, Any]             # 剧情偏离度
+    resolution: dict[str, Any]             # 综合裁定结果
+    # 叙事与选项
+    generated_payload: dict[str, Any]      # LLM 生成的完整载荷
+    narration: str                         # 守秘人叙事文本
+    options: list[str]                     # 玩家可选行动
+    state_delta: dict[str, Any]            # 状态增量
+    story_state: dict[str, Any]            # 剧情状态
+    # 校验报告
+    validation_report: dict[str, Any]      # 确定性校验报告
+    leak_report: dict[str, Any]            # 剧透泄漏报告
+    audit: dict[str, Any]                  # 审计记录
+    summary: dict[str, Any]                # 会话摘要
+    discovered_clues: list[models.Clue]    # 本回合发现的线索
+    needs_clarification: bool              # 是否需要追问
+    # 上下文
+    visible_context: dict[str, Any]        # 玩家可见上下文
+    keeper_only_context: dict[str, Any]    # 守秘人专用上下文
+    # 计划与执行
+    turn_plan: dict[str, Any]              # 回合计划
+    plan_validation: dict[str, Any]        # 计划校验结果
+    react_trace: list[dict[str, Any]]      # ReAct 执行轨迹
+    tool_observations: list[dict[str, Any]]  # Tool 观察结果
+    skill_results: list[dict[str, Any]]    # Skill 执行结果
+    plan_gap: bool                         # 计划是否有缺口
+    reflection_report: dict[str, Any]      # Reflection 自检报告
+    repair_attempts: int                   # 修复尝试次数
+    final_guardrail_report: dict[str, Any] # 综合守卫报告
+    # 调试
+    debug_emit: DebugEmitter               # 调试事件发射器
+    # 配图
+    needs_image: bool                      # 是否需要生成配图
+    image_scene_type: str                  # 配图场景类型
+    image_url: str | None                  # 配图 URL
+    image_prompt_raw: str                  # 原始配图提示词
+    image_prompt_optimized: str            # 优化后的配图提示词
+    image_metadata: dict[str, Any]         # 配图元数据
 
 
 class KeeperAgent(KeeperSupervisor):
-    """向后兼容壳：内部逻辑已迁移到 KeeperSupervisor 与各子 Agent。"""
+    """向后兼容壳：内部逻辑已迁移到 KeeperSupervisor 与各子 Agent。
+
+    API 层（api.py）仍然使用 KeeperAgent 类名，但实际执行的是 KeeperSupervisor.run_turn。
+    新项目应直接使用 KeeperSupervisor。
+    """
     pass
 
 
 class _OldKeeperAgent:
+    """旧版 LangGraph 守秘人实现（已废弃，保留供参考）。
+
+    旧版使用 LangGraph StateGraph 编排回合流程，所有节点共享 KeeperState 字典。
+    新版使用多 Agent 架构（KeeperSupervisor + 5 个专业 Agent），通过 AgentMessage 信封传递数据。
+    """
     def __init__(self) -> None:
         # LLMClient 负责调用大模型；RetrievalService 负责向量检索；graph 是 LangGraph 编译后的执行图。
         self.llm = LLMClient()
