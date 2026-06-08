@@ -33,7 +33,7 @@
 #   → 更新 PostgreSQL（状态、线索、物品、回合日志）
 #   → 写入 ChromaDB（会话记忆向量）
 #
-# 对外接口与旧 KeeperAgent.run_turn 完全兼容。
+# 对旧的 KeeperAgent.run_turn 调用保持兼容。
 # =============================================================================
 from __future__ import annotations
 
@@ -53,6 +53,7 @@ from app.services.agents.utils import (
     ensure_options,
     update_no_clue_counter,
 )
+from app.services.agent_monitor import AgentTraceRecorder
 from app.services.chunking import DocumentChunk
 from app.services.debug_events import DebugEmitter, emit_debug
 from app.services.guardrails import validate_state_delta
@@ -83,8 +84,8 @@ class KeeperSupervisor:
     没有 Supervisor，Agent 们不知道谁先谁后、数据怎么传递。
 
     【对外接口】
-    run_turn(db, session_id, player_input, debug_emit) → dict
-    与旧版 KeeperAgent.run_turn 保持完全兼容。
+    run_turn(db, session_id, player_input, debug_emit=None, trace_recorder=None) → dict
+    调用签名与旧版 KeeperAgent.run_turn 保持兼容；当前 API 层直接调用 KeeperSupervisor。
     """
 
     def __init__(self) -> None:
@@ -119,7 +120,14 @@ class KeeperSupervisor:
         self.narrator_agent = NarratorAgent(self.context)  # 守秘人叙事生成
         self.guard_agent = GuardAgent(self.context)  # 守卫校验与防剧透
 
-    def run_turn(self, db: Session, session_id: str, player_input: str, debug_emit: DebugEmitter | None = None) -> dict[str, Any]:
+    def run_turn(
+        self,
+        db: Session,
+        session_id: str,
+        player_input: str,
+        debug_emit: DebugEmitter | None = None,
+        trace_recorder: AgentTraceRecorder | None = None,
+    ) -> dict[str, Any]:
         """执行一个完整的游戏回合（run_turn = 运行回合）。
 
         【中文名称】运行回合
@@ -144,9 +152,10 @@ class KeeperSupervisor:
         - session_id: str → 游戏会话的唯一标识符
         - player_input: str → 玩家输入的自然语言文本
         - debug_emit: DebugEmitter | None → 调试事件发射器（可选）
+        - trace_recorder: AgentTraceRecorder | None → Agent 监控记录器（可选）
 
         【返回值】
-        - dict: 兼容旧版 KeeperState 的字典，包含：
+        - dict: 面向 API 层的回合结果字典，字段兼容旧版 KeeperState，包含：
           - narration: 守秘人叙事文本
           - options: 玩家可选行动列表
           - state_delta: 状态变化
@@ -158,7 +167,13 @@ class KeeperSupervisor:
 
         # === Phase 1: 加载上下文 ===
         ctx_envelope = AgentMessage(
-            payload={"db": db, "session_id": session_id, "player_input": player_input, "debug_emit": debug_emit}
+            payload={
+                "db": db,
+                "session_id": session_id,
+                "player_input": player_input,
+                "debug_emit": debug_emit,
+                "trace_recorder": trace_recorder,
+            }
         )
         ctx_result = self.context_agent.run(ctx_envelope)
         ctx = ctx_result["payload"]
@@ -170,6 +185,7 @@ class KeeperSupervisor:
                 "intent": ctx["intent"],
                 "player_input": player_input,
                 "debug_emit": debug_emit,
+                "trace_recorder": trace_recorder,
             }
         )
         plan_result = self.planner_agent.run(plan_envelope)
@@ -180,7 +196,7 @@ class KeeperSupervisor:
             emit_debug(debug_emit, phase="agent_node", name="Supervisor", status="success", message="玩家输入模糊，进入澄清分支。")
             return self._clarify_and_commit(
                 db, ctx["session"], ctx["character"], player_input, ctx["intent"],
-                plan["turn_plan"], ctx["story_state"], debug_emit
+                plan["turn_plan"], ctx["story_state"], debug_emit, trace_recorder
             )
 
         # === Phase 3: 执行计划（Skill + 规则检定） ===
@@ -199,6 +215,7 @@ class KeeperSupervisor:
                 "memory_context": ctx["memory_context"],
                 "rule_context": ctx["rule_context"],
                 "debug_emit": debug_emit,
+                "trace_recorder": trace_recorder,
             }
         )
         exec_result = self.executor_agent.run(exec_envelope)
@@ -223,6 +240,7 @@ class KeeperSupervisor:
                 "character": ctx["character"],
                 "story_state": ctx["story_state"],
                 "debug_emit": debug_emit,
+                "trace_recorder": trace_recorder,
             }
         )
         narr_result = self.narrator_agent.run(narr_envelope)
@@ -255,6 +273,7 @@ class KeeperSupervisor:
                 "memory_context": ctx["memory_context"],
                 "rule_context": ctx["rule_context"],
                 "debug_emit": debug_emit,
+                "trace_recorder": trace_recorder,
             }
         )
         guard_result = self.guard_agent.run(guard_envelope)
@@ -264,7 +283,7 @@ class KeeperSupervisor:
         # 当 GuardAgent 判定需要修复时，根据修复类型执行相应操作
         # repair_text: 让 NarratorAgent 重新生成叙事
         # repair_state_delta: 修复状态增量
-        # ask_clarification/fail_safe: 构造追问/兤底响应，不再继续修复
+        # ask_clarification/fail_safe: 构造追问/兜底响应，不再继续修复
         # replan_once: 重新规划一次
         repair_attempts = 0
         while guard_data["needs_repair"] and repair_attempts < 2:
@@ -281,7 +300,7 @@ class KeeperSupervisor:
             if repair_type == "repair_text":
                 # 让 NarratorAgent 重新生成叙事，注入修复指令
                 repair_envelope = AgentMessage(
-                    payload={**narr_envelope["payload"], "repair_instruction": guard_data["repair_instruction"]}
+                    payload={**narr_envelope["payload"], "repair_instruction": guard_data["repair_instruction"], "trace_recorder": trace_recorder}
                 )
                 narr_result = self.narrator_agent.repair(repair_envelope)
                 narr_data = narr_result["payload"]
@@ -291,7 +310,7 @@ class KeeperSupervisor:
                 validated_delta, _ = validate_state_delta(merged, ctx["story_state"])
                 narr_data = {**narr_data, "state_delta": validated_delta}
             elif repair_type in ("ask_clarification", "fail_safe"):
-                # 追问或兤底：构造固定响应，不再继续修复循环
+                # 追问或兜底：构造固定响应，不再继续修复循环
                 narr_data["narration"] = guard_data["repair_instruction"] or "这个行动还需要更多明确目标。你可以说明想调查的对象、使用的物品或采取的方式。"
                 narr_data["options"] = ["说明具体目标", "换一种调查方式", "回顾已知线索", "自定义行动"]
                 narr_data["state_delta"] = {"clarification": True, "time_cost_minutes": 0, "danger_delta": 0}
@@ -304,6 +323,7 @@ class KeeperSupervisor:
                         "intent": ctx["intent"],
                         "player_input": player_input,
                         "debug_emit": debug_emit,
+                        "trace_recorder": trace_recorder,
                     }
                 )
                 plan_result = self.planner_agent.run(plan_envelope)
@@ -311,7 +331,7 @@ class KeeperSupervisor:
                 if plan["needs_clarification"]:
                     return self._clarify_and_commit(
                         db, ctx["session"], ctx["character"], player_input, ctx["intent"],
-                        plan["turn_plan"], ctx["story_state"], debug_emit
+                        plan["turn_plan"], ctx["story_state"], debug_emit, trace_recorder
                     )
                 # 简化处理：直接 break 避免无限递归
                 break
@@ -351,6 +371,7 @@ class KeeperSupervisor:
             needs_image=narr_data.get("needs_image", False),
             image_scene_type=narr_data.get("image_scene_type", ""),
             debug_emit=debug_emit,
+            trace_recorder=trace_recorder,
         )
 
     def _clarify_and_commit(
@@ -363,6 +384,7 @@ class KeeperSupervisor:
         turn_plan: dict[str, Any],
         story_state: dict[str, Any],
         debug_emit: DebugEmitter | None,
+        trace_recorder: AgentTraceRecorder | None,
     ) -> dict[str, Any]:
         """处理追问回合（_clarify_and_commit = 追问并落库）。
 
@@ -389,9 +411,10 @@ class KeeperSupervisor:
         - turn_plan: 回合计划（包含 clarification_question）
         - story_state: 剧情状态
         - debug_emit: 调试事件发射器
+        - trace_recorder: Agent 监控记录器
 
         【返回值】
-        - dict: 兼容旧版 KeeperState 的字典
+        - dict: 面向 API 层的回合结果字典，字段兼容旧版 KeeperState
         """
         question = turn_plan.get("clarification_question") or intent.get("clarification_question") or "你想具体调查哪里，或以什么方式行动？"
         narration = str(question)  # 叙事就是追问问题
@@ -432,6 +455,7 @@ class KeeperSupervisor:
             needs_image=False,
             image_scene_type="",
             debug_emit=debug_emit,
+            trace_recorder=trace_recorder,
         )
 
     def _commit_state(
@@ -460,6 +484,7 @@ class KeeperSupervisor:
         needs_image: bool,
         image_scene_type: str,
         debug_emit: DebugEmitter | None,
+        trace_recorder: AgentTraceRecorder | None = None,
     ) -> dict[str, Any]:
         """唯一集中落库方法（_commit_state = 提交状态/保存存档）。
 
@@ -506,10 +531,18 @@ class KeeperSupervisor:
         - needs_image: 是否需要配图
         - image_scene_type: 配图场景类型
         - debug_emit: 调试事件发射器
+        - trace_recorder: Agent 监控记录器
 
         【返回值】
-        - dict: 兼容旧版 KeeperState 的字典，供 API 层使用
+        - dict: 面向 API 层的回合结果字典，字段兼容旧版 KeeperState，供 API 层使用
         """
+        # 这是整个回合里最值得“逐行精读”的方法之一。
+        # 前面的 Agent 更偏“思考与生成”，这里只有一个核心问题：
+        # “这回合结束后，哪些变化会真正永久保存？”
+        #
+        # 如果你是学生，建议读这段时持续带着两个问题：
+        # 1. 哪些数据只是本回合临时使用，哪些数据会写入长期状态？
+        # 2. 某个字段最终是写进 PostgreSQL，还是写进 Chroma 记忆库？
         turn_index = len(session.turn_logs) + 1  # 回合序号
         discovered: list[models.Clue] = []  # 本回合发现的线索
 
@@ -519,6 +552,9 @@ class KeeperSupervisor:
 
         # ===== 2. 应用状态增量 =====
         # 将 state_delta 合并到 session.state，更新地点、场景、时间、危险等级
+        # 这里是“结构化状态推进”的关键点：
+        # Narrator/Guard 之前产出的 state_delta 还是“本回合变化说明”，
+        # apply_turn_delta 之后，它才真正变成 session.state 里的长期世界状态。
         session.state = apply_turn_delta(
             story_state, state_delta,
             session.current_location, session.current_scene, session.current_time,
@@ -533,6 +569,8 @@ class KeeperSupervisor:
 
         # ===== 3. 保存元数据 =====
         # 将本回合的关键数据保存到 session.state，供调试和回溯使用
+        # 注意这里保存了很多 last_* 字段。
+        # 它们不一定都是“剧情世界的一部分”，更多是为了前端展示、调试面板和学习排查方便。
         session.state = {
             **session.state,
             "last_intent": intent,  # 最后意图
@@ -606,6 +644,8 @@ class KeeperSupervisor:
 
         # ===== 8. 写 TurnLog =====
         # 记录本回合的完整信息，供调试和回溯使用
+        # 可以把 TurnLog 理解成“回合级审计日志”：
+        # 它不会替代 session.state，但能帮你回看“第 N 回合当时为什么这样判断”。
         log = models.TurnLog(
             session_id=session.id,
             turn_index=turn_index,
@@ -639,9 +679,36 @@ class KeeperSupervisor:
             },
         )
         db.add(log)
+        db.flush()
+        if trace_recorder:
+            trace_recorder.record(
+                agent_name="KeeperSupervisor",
+                step_name="commit_state",
+                phase="commit",
+                status="success",
+                input_payload={
+                    "session_id": session.id,
+                    "turn_index": turn_index,
+                    "player_input": player_input,
+                    "intent": intent,
+                    "turn_plan": turn_plan,
+                    "state_delta": state_delta,
+                },
+                output_payload={
+                    "turn_log_id": log.id,
+                    "narration": narration,
+                    "options": options,
+                    "discovered_clues": [clue.name for clue in discovered],
+                    "needs_image": needs_image,
+                    "image_scene_type": image_scene_type,
+                },
+            )
 
         # ===== 9. 写入向量记忆 =====
         # 将本回合的关键信息写入 ChromaDB，供后续回合的 RAG 检索使用
+        # 这里体现了 PostgreSQL 和 Chroma 的分工：
+        # - PostgreSQL 保存结构化真相：会话、线索、地点、回合日志
+        # - Chroma 保存“便于语义回忆”的文本记忆，方便后续相似检索
         memory_chunks: list[DocumentChunk] = []
         mem_chunk = build_session_memory_chunk(session.id, turn_index, {  # 回合记忆
             "player_input": player_input,
@@ -665,7 +732,7 @@ class KeeperSupervisor:
 
         emit_debug(debug_emit, phase="agent_node", name="commit_state", status="success", message="状态已落库。", metadata={"session_id": session.id, "turn_index": turn_index})
 
-        # 返回兼容旧 KeeperState 的字典，供 API 层使用
+        # 返回面向 API 层的回合结果字典，保留旧 KeeperState 字段名以兼容旧调用。
         return {
             "db": db,
             "session_id": session.id,

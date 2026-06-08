@@ -203,6 +203,53 @@ class AssistantChatResponse(BaseModel):
     mode: str = "auto"  # mode = 实际使用的助手模式
 
 
+class AgentTraceRunOut(BaseModel):
+    """Agent 监控运行响应模型。"""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    session_id: str | None = None
+    source: str
+    status: str
+    metadata_: dict[str, Any] = Field(default_factory=dict)
+    started_at: datetime
+    ended_at: datetime | None = None
+
+
+class AgentTraceRecordOut(BaseModel):
+    """Agent 监控步骤响应模型。"""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    run_id: str
+    sequence: int
+    session_id: str | None = None
+    source: str
+    agent_name: str
+    step_name: str
+    phase: str
+    status: str
+    input_payload: dict[str, Any] = Field(default_factory=dict)
+    output_payload: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    duration_ms: int | None = None
+    created_at: datetime
+
+
+class AgentTraceSettingsOut(BaseModel):
+    """Agent 监控配置与当前存量。"""
+
+    max_records: int
+    record_count: int
+    run_count: int
+
+
+class AgentTraceSettingsUpdate(BaseModel):
+    """更新 Agent 监控全局配置。"""
+
+    max_records: int = Field(ge=0, le=200000)
+
+
 class ImportRequest(BaseModel):
     """数据导入请求模型：控制是否重置向量库和导入角色卡。"""
     reset_chroma: bool = False  # reset_chroma = 是否重置Chroma向量库

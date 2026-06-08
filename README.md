@@ -1,6 +1,6 @@
 # 克苏鲁守秘人轻量版 🕯️
 
-> 基于 `FastAPI + LangGraph + React/Vite + PostgreSQL + Chroma`，以多 Agent 协作架构为核心的《克苏鲁的呼唤》调查游戏 AI 守秘人网页版原型
+> 基于 `FastAPI + React/Vite + PostgreSQL + Chroma`，以 `KeeperSupervisor` 多 Agent 协作架构为核心的《克苏鲁的呼唤》调查游戏 AI 守秘人网页版原型
 
 ---
 
@@ -15,6 +15,18 @@
 - **Reflection**：叙事和状态提交前，由 `GuardAgent` 进行自我批判，校验剧情一致性、规则一致性、防剧透与状态合法性。
 
 同时，系统附带独立的 **游戏助手**（`GameAssistantAgent`），让玩家可以随时查询规则、术语和已发现线索，而不会推进剧情或被剧透。
+
+> 说明：旧版 LangGraph 实现仍保留在 `backend/app/services/agent.py` 的 `_OldKeeperAgent` 中供参考；当前主回合链路不再通过 LangGraph `StateGraph` 执行。
+
+### 学习入口
+
+如果你是第一次接触这个项目，建议先读这几份文档：
+
+- [docs/初学者学习指南](D:/Project/coc-lite/docs/初学者学习指南.md)：适合先建立全局认识
+- [docs/后端主线精读](D:/Project/coc-lite/docs/后端主线精读.md)：适合顺着“一次请求怎么跑完整条后端链路”来读
+- [docs/变量查询表](D:/Project/coc-lite/docs/变量查询表.md)：适合查变量和状态字段，不容易在代码里迷路
+- [docs/Tools扩展指南](D:/Project/coc-lite/docs/Tools扩展指南.md)：适合学习如何新增一个原子 Tool
+- [docs/Skills扩展指南](D:/Project/coc-lite/docs/Skills扩展指南.md)：适合学习如何新增一种复合行动 Skill
 
 ### 核心能力
 
@@ -93,9 +105,9 @@
 | **NarratorAgent** | 基于检索上下文、裁定结果和角色状态生成玩家可见叙事；提取候选状态变化；生成下一步行动建议 |
 | **GuardAgent** | Reflection 自检：剧情一致性、规则一致性、防剧透、状态合法性、叙事质量；配合代码层 `deterministic_guardrails` 与 `final_guardrails` |
 
-### 回合状态流
+### 回合数据流
 
-`KeeperState` 关键字段：
+当前回合内部数据主要通过 `AgentMessage.payload` 在子 Agent 间传递；`KeeperSupervisor.run_turn()` 最终返回面向 API 层的结果字典，字段保持对旧版 `KeeperState` 的兼容。核心字段包括：
 
 - **输入上下文**：`db`、`session_id`、`player_input`、`session`、`character`
 - **理解与检索**：`intent`、`scenario_context`、`rule_context`、`entity_context`、`clue_context`、`memory_context`

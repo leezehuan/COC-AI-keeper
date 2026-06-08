@@ -1,0 +1,398 @@
+:root {
+  color: #e7edf6;
+  background: #0a0d12;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #0a0d12;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button,
+input,
+select {
+  border: 1px solid rgba(154, 171, 195, 0.22);
+  border-radius: 8px;
+  color: #edf4ff;
+  background: rgba(255, 255, 255, 0.055);
+  padding: 0.55rem 0.7rem;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: rgba(105, 185, 255, 0.78);
+  background: rgba(105, 185, 255, 0.12);
+}
+
+button.primary {
+  border-color: #67d39b;
+  color: #07130d;
+  background: #67d39b;
+  font-weight: 800;
+}
+
+.monitor-shell {
+  width: min(1680px, calc(100vw - 28px));
+  margin: 0 auto;
+  padding: 18px 0;
+}
+
+.monitor-header,
+.panel-header,
+.monitor-actions,
+.panel-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.monitor-header {
+  margin-bottom: 12px;
+}
+
+.monitor-eyebrow {
+  margin: 0 0 4px;
+  color: #8bbcff;
+  font-size: 0.74rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  margin-bottom: 0;
+  font-size: 1.85rem;
+}
+
+h2 {
+  margin-bottom: 0;
+  color: #f4f8ff;
+  font-size: 1rem;
+}
+
+.connection {
+  border: 1px solid rgba(154, 171, 195, 0.24);
+  border-radius: 999px;
+  padding: 0.45rem 0.65rem;
+  color: #b9c7da;
+}
+
+.connection.connected {
+  border-color: rgba(103, 211, 155, 0.5);
+  color: #94e8bd;
+}
+
+.connection.disconnected {
+  border-color: rgba(244, 100, 116, 0.5);
+  color: #ffb3bb;
+}
+
+.monitor-error {
+  border: 1px solid rgba(244, 100, 116, 0.46);
+  border-radius: 8px;
+  margin-bottom: 10px;
+  background: rgba(88, 24, 33, 0.45);
+  color: #ffc4ca;
+  padding: 10px 12px;
+}
+
+.monitor-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.metric,
+.monitor-panel {
+  border: 1px solid rgba(154, 171, 195, 0.14);
+  border-radius: 8px;
+  background: #10151d;
+}
+
+.metric {
+  min-height: 70px;
+  padding: 12px;
+}
+
+.metric span {
+  display: block;
+  margin-bottom: 8px;
+  color: #8fa0b6;
+  font-size: 0.8rem;
+}
+
+.metric strong {
+  display: block;
+  overflow: hidden;
+  color: #f4f8ff;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 330px) minmax(420px, 1fr) minmax(340px, 460px);
+  gap: 12px;
+  height: calc(100vh - 150px);
+  min-height: 620px;
+}
+
+.monitor-panel {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  padding: 12px;
+}
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.records-filter-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.run-list,
+.record-table,
+.detail-panel {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.run-list,
+.record-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.run-item,
+.record-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  border: 1px solid rgba(154, 171, 195, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  padding: 8px;
+}
+
+.run-item.active,
+.record-row:hover {
+  border-color: rgba(105, 185, 255, 0.58);
+  background: rgba(105, 185, 255, 0.08);
+}
+
+.record-row.error {
+  border-left: 4px solid #f46474;
+}
+
+.record-row.success {
+  border-left: 4px solid #67d39b;
+}
+
+.run-main,
+.record-main {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 8px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+}
+
+.record-main {
+  grid-template-columns: auto minmax(120px, 0.7fr) minmax(120px, 1fr);
+  align-items: center;
+}
+
+.run-main strong,
+.record-main strong {
+  color: #f4f8ff;
+}
+
+.run-main span,
+.record-main span,
+.run-main small,
+.record-main small {
+  overflow: hidden;
+  color: #97a8be;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-main small {
+  grid-column: 1 / -1;
+}
+
+.record-main small {
+  justify-self: end;
+}
+
+.record-seq {
+  color: #8bbcff;
+  font-weight: 800;
+}
+
+.delete-button {
+  align-self: center;
+  color: #ffbdc4;
+  padding: 0.42rem 0.55rem;
+}
+
+.selected-run-pill {
+  width: fit-content;
+  margin-bottom: 8px;
+  border-color: rgba(105, 185, 255, 0.4);
+  color: #b9dcff;
+}
+
+.empty-note {
+  margin: 10px 0 0;
+  color: #8fa0b6;
+}
+
+.record-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.record-detail dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.record-detail dl div {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.record-detail dt {
+  color: #8fa0b6;
+}
+
+.record-detail dd {
+  overflow: hidden;
+  margin: 0;
+  color: #e7edf6;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.json-block {
+  border: 1px solid rgba(154, 171, 195, 0.12);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+  padding: 8px;
+}
+
+.json-block summary {
+  cursor: pointer;
+  color: #8bbcff;
+  font-weight: 800;
+}
+
+.json-block pre {
+  max-height: 360px;
+  overflow: auto;
+  margin: 8px 0 0;
+  color: #c8d7ea;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.settings-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+.settings-form label {
+  display: grid;
+  gap: 5px;
+}
+
+.settings-form span {
+  color: #8fa0b6;
+  font-size: 0.8rem;
+}
+
+@media (max-width: 1100px) {
+  .monitor-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .monitor-layout {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+
+  .monitor-panel {
+    max-height: 680px;
+  }
+
+  .records-filter-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 700px) {
+  .monitor-header,
+  .monitor-actions,
+  .panel-header,
+  .settings-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .monitor-status-grid,
+  .records-filter-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .record-main {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .record-main small {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+}

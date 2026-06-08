@@ -7,7 +7,7 @@
 # 具体做四件事（按顺序）：
 #
 # 1. 执行 Skill（技能模板）
-#    - 从计划中取出 Skill 名称（如 "investigate"）
+#    - 从计划中取出 Skill 名称（如 "InvestigateSkill"）
 #    - 调用 run_skill() 执行该 Skill，Skill 内部会按顺序调用多个 Tool
 #    - 收集每个 Tool 的观察结果（tool_observations）
 #    - 如果 Skill 不在注册表中，标记 plan_gap=True（计划缺口）
@@ -29,6 +29,7 @@
 # =============================================================================
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any
 
 from app.services.agents.base import AgentContext, AgentMessage, BaseAgent
@@ -38,6 +39,7 @@ from app.services.agents.utils import (
     summarize_skill_outcome,
     summarize_sanity_outcome,
 )
+from app.services.agent_monitor import AgentTraceRecorder
 from app.services.debug_events import DebugEmitter, emit_debug
 from app.services.guardrails import classify_divergence
 from app.services.rules import (
@@ -132,7 +134,25 @@ class ExecutorAgent(BaseAgent):
         character = payload["character"]
         scenario_context: list[dict[str, Any]] = payload.get("scenario_context", [])
         debug_emit: DebugEmitter | None = payload.get("debug_emit")
+        trace_recorder: AgentTraceRecorder | None = payload.get("trace_recorder")
 
+        with (trace_recorder.step(agent_name=self.name, step_name="run", phase="execute", input_payload=payload) if trace_recorder else null_trace_step()) as trace_step:
+            result = self._run_impl(payload, plan, player_input, intent, session, character, scenario_context, debug_emit, trace_recorder)
+            trace_step["output"] = result
+            return result
+
+    def _run_impl(
+        self,
+        payload: dict[str, Any],
+        plan: dict[str, Any],
+        player_input: str,
+        intent: dict[str, Any],
+        session: Any,
+        character: Any,
+        scenario_context: list[dict[str, Any]],
+        debug_emit: DebugEmitter | None,
+        trace_recorder: AgentTraceRecorder | None,
+    ) -> AgentMessage:
         emit_debug(debug_emit, phase="agent_node", name="ExecutorAgent", status="start", message="ExecutorAgent 开始执行计划。")
 
         # ===== 1. 执行 Skill =====
@@ -166,11 +186,14 @@ class ExecutorAgent(BaseAgent):
             "retrieval": self.context.retrieval,  # 检索服务
             "default_skill": intent.get("skill") or infer_skill(player_input),  # 默认技能
             "debug_emit": debug_emit,  # 调试事件发射器
+            "trace_recorder": trace_recorder,  # Agent 监控记录器
         }
 
         emit_debug(debug_emit, phase="skill", name=skill_name, status="start", message="开始执行 Skill。", metadata={"allowed_tools": plan.get("allowed_tools", []), "action_type": plan.get("action_type", "")})
         try:
-            result = run_skill(skill_name, payload, runtime).as_dict()  # 执行 Skill
+            with (trace_recorder.step(agent_name=self.name, step_name=f"run_skill:{skill_name}", phase="skill", input_payload={"skill_name": skill_name, "payload": payload, "runtime": runtime}) if trace_recorder else null_trace_step()) as trace_step:
+                result = run_skill(skill_name, payload, runtime).as_dict()  # 执行 Skill
+                trace_step["output"] = result
         except Exception as exc:
             emit_debug(debug_emit, phase="skill", name=skill_name, status="error", message=str(exc)[:500])
             raise
@@ -222,7 +245,9 @@ class ExecutorAgent(BaseAgent):
         if adjudication.get("needs_roll") and not skill_checks:
             emit_debug(debug_emit, phase="tool", name="RuleCheckTool", status="start", message="开始执行规则检定。", metadata={"adjudication": adjudication})
             try:
-                results = execute_rule_tools(adjudication, character.san_current)
+                with (trace_recorder.step(agent_name=self.name, step_name="RuleCheckTool", phase="tool", input_payload={"adjudication": adjudication, "san_current": character.san_current}) if trace_recorder else null_trace_step()) as trace_step:
+                    results = execute_rule_tools(adjudication, character.san_current)
+                    trace_step["output"] = results
             except Exception as exc:
                 emit_debug(debug_emit, phase="tool", name="RuleCheckTool", status="error", message=str(exc)[:500])
                 raise
@@ -275,3 +300,9 @@ class ExecutorAgent(BaseAgent):
             },
             context_summary=f"Skill {skill_name} 完成，检定 {len(skill_checks)} 次，理智 {len(sanity_checks)} 次。",
         )
+
+
+@contextmanager
+def null_trace_step():
+    state: dict[str, Any] = {}
+    yield state

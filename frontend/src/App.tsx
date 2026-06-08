@@ -215,7 +215,7 @@ export default function App() {
 
   async function resumeSessionById(sessionId: string) {
     // 恢复会话时根据最近回合重建聊天消息，并复用上次可选行动。
-    // 【Web 流程 4】恢复会话只读取后端保存过的状态，不会重新执行上一回合的 LangGraph。
+    // 【Web 流程 4】恢复会话只读取后端保存过的状态，不会重新执行上一回合的 Agent 流程。
     if (!sessionId || busy) return;
     setBusy(true);
     setError('');

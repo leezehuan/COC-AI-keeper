@@ -115,7 +115,7 @@ export interface GameSession {
   recent_turns: TurnLog[];          // 最近的回合日志
 }
 
-/** 回合响应：KeeperAgent.run_turn 的返回结果 */
+/** 回合响应：KeeperSupervisor.run_turn 结果经后端 build_action_response 整理后的前端结构 */
 export interface ActionResponse {
   session: GameSession;             // 更新后的会话
   narration: string;                // 守秘人叙事文本
@@ -200,3 +200,47 @@ export interface ChatMessage {
   imageLoading?: boolean;                  // 配图是否加载中
   imageAspectRatio?: string;               // 配图宽高比
 }
+
+/** Agent 监控运行记录 */
+export interface AgentTraceRun {
+  id: string;
+  session_id: string | null;
+  source: string;
+  status: string;
+  metadata_: Record<string, unknown>;
+  started_at: string;
+  ended_at: string | null;
+}
+
+/** Agent 监控步骤记录 */
+export interface AgentTraceRecord {
+  id: string;
+  run_id: string;
+  sequence: number;
+  session_id: string | null;
+  source: string;
+  agent_name: string;
+  step_name: string;
+  phase: string;
+  status: string;
+  input_payload: Record<string, unknown>;
+  output_payload: Record<string, unknown>;
+  error: string | null;
+  duration_ms: number | null;
+  created_at: string;
+}
+
+/** Agent 监控配置 */
+export interface AgentTraceSettings {
+  max_records: number;
+  record_count: number;
+  run_count: number;
+}
+
+/** Agent 监控实时事件 */
+export type AgentMonitorEvent =
+  | { type: 'start'; timestamp: string }
+  | { type: 'heartbeat'; timestamp: string }
+  | { type: 'run'; run: AgentTraceRun; timestamp: string }
+  | { type: 'record'; record: AgentTraceRecord; timestamp: string }
+  | { type: 'settings'; settings: AgentTraceSettings; timestamp: string };

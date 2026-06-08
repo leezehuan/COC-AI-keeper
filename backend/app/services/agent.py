@@ -43,11 +43,11 @@ from app.services.agents.supervisor import KeeperSupervisor
 from app.utils import safe_key
 
 
-# 【阅读顺序 5：LangGraph 守秘人核心】
+# 【阅读顺序 5：旧版 LangGraph 守秘人核心（供参考）】
 # 如果你是 LangGraph 初学者，建议按下面顺序阅读：
 # 1. KeeperState：理解“图里的共享状态字典”。
-# 2. KeeperAgent._build_graph：理解节点如何串成流程图。
-# 3. run_turn：理解 API 如何启动一次图执行。
+# 2. _OldKeeperAgent._build_graph：理解节点如何串成流程图。
+# 3. _OldKeeperAgent.run_turn：理解旧版如何启动一次图执行。
 # 4. load_state -> parse_intent -> retrieve_context -> adjudicate -> roll_tools -> resolve_action。
 # 5. generate_response -> generate_state_delta -> validate_state_delta_node -> secret_leak_check。
 # 6. generate_next_options -> commit_state：理解最终如何落库并返回给前端。
@@ -118,8 +118,8 @@ class KeeperState(TypedDict, total=False):
 class KeeperAgent(KeeperSupervisor):
     """向后兼容壳：内部逻辑已迁移到 KeeperSupervisor 与各子 Agent。
 
-    API 层（api.py）仍然使用 KeeperAgent 类名，但实际执行的是 KeeperSupervisor.run_turn。
-    新项目应直接使用 KeeperSupervisor。
+    当前 API 层（api.py）已直接使用 KeeperSupervisor。
+    旧代码如果仍实例化 KeeperAgent，实际执行的是继承来的 KeeperSupervisor.run_turn。
     """
     pass
 
@@ -138,7 +138,7 @@ class _OldKeeperAgent:
 
     def run_turn(self, db: Session, session_id: str, player_input: str, debug_emit: DebugEmitter | None = None) -> KeeperState:
         # 每次玩家输入都会启动一次完整守秘人回合，并返回最终状态供 API 序列化。
-        # 【LangGraph 启动点】API 层只需要传入数据库会话、游戏会话 id 和玩家输入，剩余步骤由图自动执行。
+        # 【旧版 LangGraph 启动点】旧版调用只需要传入数据库会话、游戏会话 id 和玩家输入，剩余步骤由图自动执行。
         initial: KeeperState = {"db": db, "session_id": session_id, "player_input": player_input}
         if debug_emit is not None:
             initial["debug_emit"] = debug_emit

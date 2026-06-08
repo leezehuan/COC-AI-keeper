@@ -27,10 +27,12 @@
 # =============================================================================
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any
 
 from app.services.agents.base import AgentContext, AgentMessage, BaseAgent
 from app.services.agents.utils import ensure_options, fallback_response
+from app.services.agent_monitor import AgentTraceRecorder
 from app.services.debug_events import DebugEmitter, emit_debug
 from app.services.guardrails import (
     build_audit_record,
@@ -127,7 +129,19 @@ class GuardAgent(BaseAgent):
         """
         payload = envelope.get("payload", {})
         debug_emit: DebugEmitter | None = payload.get("debug_emit")
+        trace_recorder: AgentTraceRecorder | None = payload.get("trace_recorder")
 
+        with (trace_recorder.step(agent_name=self.name, step_name="run", phase="guard", input_payload=payload) if trace_recorder else null_trace_step()) as trace_step:
+            result = self._run_impl(payload, debug_emit, trace_recorder)
+            trace_step["output"] = result
+            return result
+
+    def _run_impl(
+        self,
+        payload: dict[str, Any],
+        debug_emit: DebugEmitter | None,
+        trace_recorder: AgentTraceRecorder | None,
+    ) -> AgentMessage:
         emit_debug(debug_emit, phase="agent_node", name="GuardAgent", status="start", message="GuardAgent 开始执行校验与 Reflection。")
 
         # ===== 1. 确定性校验 =====
@@ -146,7 +160,7 @@ class GuardAgent(BaseAgent):
             "validation_report": validation_report,
             "leak_report": {},
         }
-        reflection_report = self._run_reflection(reflection_state, debug_emit)
+        reflection_report = self._run_reflection(reflection_state, debug_emit, trace_recorder)
 
         # ===== 3. 防剧透清洗 =====
         # 移除叙事和选项中不应向玩家透露的信息（如未发现线索的细节）
@@ -198,7 +212,12 @@ class GuardAgent(BaseAgent):
             context_summary=f"Reflection {result}，校验 {'通过' if not needs_repair else '需要修复'}。",
         )
 
-    def _run_reflection(self, state: dict[str, Any], debug_emit: DebugEmitter | None) -> dict[str, Any]:
+    def _run_reflection(
+        self,
+        state: dict[str, Any],
+        debug_emit: DebugEmitter | None,
+        trace_recorder: AgentTraceRecorder | None,
+    ) -> dict[str, Any]:
         """执行 Reflection 自检（_run_reflection = 运行自检/反思）。
 
         【中文名称】运行自检
@@ -234,10 +253,18 @@ class GuardAgent(BaseAgent):
         }
         prompt = build_reflection_prompt(state)
         try:
-            report = self.context.llm.chat_json(prompt, fallback=fallback)  # LLM 自检
+            with (trace_recorder.step(agent_name=self.name, step_name="reflection_review", phase="agent_step", input_payload={"prompt": prompt, "state": state, "fallback": fallback}) if trace_recorder else null_trace_step()) as trace_step:
+                report = self.context.llm.chat_json(prompt, fallback=fallback)  # LLM 自检
+                trace_step["output"] = report
         except Exception as exc:
             emit_debug(debug_emit, phase="agent_step", name="reflection_review", status="error", message=str(exc)[:500])
             report = fallback  # LLM 失败时默认通过
         if not isinstance(report, dict):
             report = fallback
         return {**fallback, **report}  # 合并结果，确保所有字段都有值
+
+
+@contextmanager
+def null_trace_step():
+    state: dict[str, Any] = {}
+    yield state

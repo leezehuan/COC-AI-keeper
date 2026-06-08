@@ -30,6 +30,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from app.services.agent_monitor import AgentTraceRecorder
 from app.services.debug_events import DebugEmitter, emit_debug, detail_tool_observation
 from app.services.skills.base import SkillResult, SkillSpec
 from app.services.tools.clue_eligibility import run_clue_eligibility
@@ -51,6 +52,7 @@ def run_tool_with_debug(
     start_message: str,
     handler: Callable[[], Any],
     start_metadata: dict[str, Any] | None = None,
+    trace_recorder: AgentTraceRecorder | None = None,
 ) -> None:
     """带调试事件发射的 Tool 执行包装器（run_tool_with_debug = 带调试运行 Tool）。
 
@@ -79,7 +81,12 @@ def run_tool_with_debug(
     """
     emit_debug(debug_emit, phase="tool", name=tool_name, status="start", message=start_message, metadata=start_metadata)
     try:
-        observation = handler()
+        if trace_recorder:
+            with trace_recorder.step(agent_name="SkillTool", step_name=tool_name, phase="tool", input_payload=start_metadata or {}) as trace_step:
+                observation = handler()
+                trace_step["output"] = observation.as_dict()
+        else:
+            observation = handler()
     except Exception as exc:
         emit_debug(debug_emit, phase="tool", name=tool_name, status="error", message=str(exc)[:500])
         raise
@@ -122,6 +129,7 @@ def run_generic_skill(*, spec: SkillSpec, state: dict[str, Any], runtime: dict[s
     intent = state.get("intent", {})  # 结构化意图
     query = build_skill_query(state)  # 构建检索查询文本
     debug_emit = runtime.get("debug_emit")  # 调试事件发射器
+    trace_recorder: AgentTraceRecorder | None = runtime.get("trace_recorder")  # 监控记录器
 
     # ===== 1. 上下文检索 =====
     if "ContextSearchTool" in allowed_tools and runtime.get("retrieval") is not None:
@@ -133,6 +141,7 @@ def run_generic_skill(*, spec: SkillSpec, state: dict[str, Any], runtime: dict[s
                 n_results=int(runtime.get("n_results") or 3),
             ),
             start_metadata={"query": query, "collections": runtime.get("collections") or DEFAULT_COLLECTIONS},
+            trace_recorder=trace_recorder,
         )
 
     # ===== 2. 物品栏查询 =====
@@ -141,6 +150,7 @@ def run_generic_skill(*, spec: SkillSpec, state: dict[str, Any], runtime: dict[s
             debug_emit, observations, "InventoryLookupTool", "开始查询物品栏。",
             lambda: run_inventory_lookup(items=getattr(session, "inventory_items", []), query=str(intent.get("target") or "")),
             start_metadata={"target": str(intent.get("target") or "")},
+            trace_recorder=trace_recorder,
         )
 
     # ===== 3. 场景可交互信息 =====
@@ -149,6 +159,7 @@ def run_generic_skill(*, spec: SkillSpec, state: dict[str, Any], runtime: dict[s
             debug_emit, observations, "SceneAffordanceTool", "开始读取场景可交互信息。",
             lambda: run_scene_affordance(location_context=state.get("entity_context", []), story_state=state.get("story_state", {})),
             start_metadata={"location": getattr(session, "current_location", "")},
+            trace_recorder=trace_recorder,
         )
 
     # ===== 4. 线索候选资格 =====
@@ -158,6 +169,7 @@ def run_generic_skill(*, spec: SkillSpec, state: dict[str, Any], runtime: dict[s
             debug_emit, observations, "ClueEligibilityTool", "开始判断线索候选资格。",
             lambda: run_clue_eligibility(target=str(intent.get("target") or ""), clue_context=state.get("clue_context", []), known_clue_keys=known_keys),
             start_metadata={"target": str(intent.get("target") or ""), "known_clue_count": len(known_keys)},
+            trace_recorder=trace_recorder,
         )
 
     # ===== 5. 会话记忆召回 =====
@@ -166,6 +178,7 @@ def run_generic_skill(*, spec: SkillSpec, state: dict[str, Any], runtime: dict[s
             debug_emit, observations, "MemoryRecallTool", "开始召回会话记忆。",
             lambda: run_memory_recall(retrieval=runtime["retrieval"], query=query, session_id=session.id, n_results=3),
             start_metadata={"query": query, "session_id": session.id},
+            trace_recorder=trace_recorder,
         )
 
     # ===== 6. 规则检定（仅当需要时） =====
@@ -180,6 +193,7 @@ def run_generic_skill(*, spec: SkillSpec, state: dict[str, Any], runtime: dict[s
                 current_san=character.san_current, luck=character.luck,
             ),
             start_metadata={"default_skill": str(intent.get("skill") or runtime.get("default_skill") or "侦查"), "current_san": character.san_current},
+            trace_recorder=trace_recorder,
         )
 
     # ===== 汇总结果 =====

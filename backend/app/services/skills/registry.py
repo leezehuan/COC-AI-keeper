@@ -72,7 +72,7 @@ def run_skill(skill_name: str, state: dict[str, Any], runtime: dict[str, Any]) -
 
     参数：
         skill_name：Skill 名称，如 "InvestigateSkill"
-        state：当前回合状态（KeeperState 的子集）
+        state：当前回合上下文 payload/状态字典的子集
         runtime：运行时参数（retrieval、debug_emit、allowed_tools 等）
     返回：
         SkillResult，包含所有 Tool 的观察结果和决策摘要

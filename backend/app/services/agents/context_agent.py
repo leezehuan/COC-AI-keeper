@@ -32,6 +32,7 @@
 # =============================================================================
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any
 
 from sqlalchemy.orm import Session, selectinload
@@ -42,6 +43,7 @@ from app.services.agents.utils import (
     format_inventory,
     heuristic_intent,
 )
+from app.services.agent_monitor import AgentTraceRecorder
 from app.services.debug_events import DebugEmitter, emit_debug
 from app.services.prompt_config import build_intent_prompt
 from app.services.story_state import ensure_story_state
@@ -115,7 +117,21 @@ class ContextAgent(BaseAgent):
         session_id: str = payload["session_id"]  # session_id = 会话ID：标识当前游戏
         player_input: str = payload["player_input"]  # player_input = 玩家输入：玩家发送的自然语言文本
         debug_emit: DebugEmitter | None = payload.get("debug_emit")  # debug_emit = 调试发射器：向前端发送实时调试事件
+        trace_recorder: AgentTraceRecorder | None = payload.get("trace_recorder")
 
+        with (trace_recorder.step(agent_name=self.name, step_name="run", phase="context", input_payload=payload) if trace_recorder else null_trace_step()) as trace_step:
+            result = self._run_impl(db, session_id, player_input, debug_emit, trace_recorder)
+            trace_step["output"] = result
+            return result
+
+    def _run_impl(
+        self,
+        db: Session,
+        session_id: str,
+        player_input: str,
+        debug_emit: DebugEmitter | None,
+        trace_recorder: AgentTraceRecorder | None,
+    ) -> AgentMessage:
         emit_debug(debug_emit, phase="agent_node", name="ContextAgent", status="start", message="ContextAgent 开始加载状态与检索。")
 
         # ===== 1. 加载会话与关联数据 =====
@@ -140,7 +156,7 @@ class ContextAgent(BaseAgent):
 
         # ===== 2. 解析意图 =====
         # 将玩家自然语言输入解析为结构化意图（action_type、target、skill 等）
-        intent = self._parse_intent(session, player_input, debug_emit)  # intent = 意图：解析后的结构化意图字典
+        intent = self._parse_intent(session, player_input, debug_emit, trace_recorder)  # intent = 意图：解析后的结构化意图字典
 
         # ===== 3. 构建可见上下文 =====
         # visible_context：玩家可以看到的信息（地点、场景、物品、已知线索等）
@@ -159,7 +175,7 @@ class ContextAgent(BaseAgent):
         # ===== 4. RAG 检索 =====
         # 从 ChromaDB 向量库中检索相关上下文片段
         scenario_context, entity_context, clue_context, memory_context, rule_context = self._retrieve_context(  # 五个检索结果
-            session, player_input, intent, debug_emit
+            session, player_input, intent, debug_emit, trace_recorder
         )
 
         emit_debug(
@@ -193,7 +209,13 @@ class ContextAgent(BaseAgent):
             context_summary=f"会话 {session_id}，地点 {session.current_location}，意图 {intent.get('action_type', '未知')}",
         )
 
-    def _parse_intent(self, session: models.GameSession, player_input: str, debug_emit: DebugEmitter | None) -> dict[str, Any]:
+    def _parse_intent(
+        self,
+        session: models.GameSession,
+        player_input: str,
+        debug_emit: DebugEmitter | None,
+        trace_recorder: AgentTraceRecorder | None,
+    ) -> dict[str, Any]:
         """解析玩家意图（_parse_intent = 解析意图）。
 
         【中文名称】解析意图
@@ -225,8 +247,19 @@ class ContextAgent(BaseAgent):
         fallback = heuristic_intent(player_input)  # fallback = 回退意图：基于关键词匹配的意图（LLM失败时使用）
         clarification_context = self._build_clarification_context(session)  # clarification_context = 追问上下文：上一轮追问信息
         prompt = build_intent_prompt(session.current_location, session.current_scene, player_input, clarification_context)  # prompt = 提示词：发给LLM的意图解析指令
+        trace_input = {
+            "session_id": session.id,
+            "current_location": session.current_location,
+            "current_scene": session.current_scene,
+            "player_input": player_input,
+            "clarification_context": clarification_context,
+            "prompt": prompt,
+            "fallback": fallback,
+        }
         try:
-            parsed = self.context.llm.chat_json(prompt, fallback=fallback)  # parsed = LLM解析结果：LLM返回的结构化意图
+            with (trace_recorder.step(agent_name=self.name, step_name="parse_intent", phase="agent_step", input_payload=trace_input) if trace_recorder else null_trace_step()) as trace_step:
+                parsed = self.context.llm.chat_json(prompt, fallback=fallback)  # parsed = LLM解析结果：LLM返回的结构化意图
+                trace_step["output"] = parsed
         except Exception as exc:
             emit_debug(debug_emit, phase="agent_step", name="parse_intent", status="error", message=str(exc)[:500])
             parsed = fallback  # LLM 失败时使用回退
@@ -276,6 +309,7 @@ class ContextAgent(BaseAgent):
         player_input: str,
         intent: dict[str, Any],
         debug_emit: DebugEmitter | None,
+        trace_recorder: AgentTraceRecorder | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         """RAG 检索上下文（_retrieve_context = 检索上下文）。
 
@@ -321,6 +355,42 @@ class ContextAgent(BaseAgent):
         ])
         emit_debug(debug_emit, phase="agent_step", name="retrieve_context", status="start", message="开始检索剧本、规则与会话记忆。", metadata={"query": query})
 
+        with (trace_recorder.step(agent_name=self.name, step_name="retrieve_context", phase="agent_step", input_payload={"session_id": session.id, "query": query, "intent": intent}) if trace_recorder else null_trace_step()) as trace_step:
+            result = self._retrieve_context_impl(session, query)
+            trace_step["output"] = {
+                "scenario_context": result[0],
+                "entity_context": result[1],
+                "clue_context": result[2],
+                "memory_context": result[3],
+                "rule_context": result[4],
+            }
+
+        scenario_context, entity_context, clue_context, memory_context, rule_context = result
+        emit_debug(
+            debug_emit,
+            phase="agent_step",
+            name="retrieve_context",
+            status="success",
+            message=(
+                f"检索完成：剧本 {len(scenario_context)}、实体 {len(entity_context)}、"
+                f"线索 {len(clue_context)}、记忆 {len(memory_context)}、规则 {len(rule_context)}。"
+            ),
+            metadata={
+                "scenario_context": scenario_context,
+                "entity_context": entity_context,
+                "clue_context": clue_context,
+                "memory_context": memory_context,
+                "rule_context": rule_context,
+            },
+        )
+        return scenario_context, entity_context, clue_context, memory_context, rule_context
+
+    def _retrieve_context_impl(
+        self,
+        session: models.GameSession,
+        query: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+
         retrieval = self.context.retrieval  # retrieval = 检索服务：用于查询 ChromaDB 向量库
         scenario_context: list[dict[str, Any]] = []  # scenario_context = 剧本片段：从 ChromaDB 检索的剧情描述
         entity_context: list[dict[str, Any]] = []  # entity_context = 实体信息：场景中的 NPC/物品/地点
@@ -350,21 +420,10 @@ class ContextAgent(BaseAgent):
         except Exception:
             rule_context = []
 
-        emit_debug(
-            debug_emit,
-            phase="agent_step",
-            name="retrieve_context",
-            status="success",
-            message=(
-                f"检索完成：剧本 {len(scenario_context)}、实体 {len(entity_context)}、"
-                f"线索 {len(clue_context)}、记忆 {len(memory_context)}、规则 {len(rule_context)}。"
-            ),
-            metadata={
-                "scenario_context": scenario_context,
-                "entity_context": entity_context,
-                "clue_context": clue_context,
-                "memory_context": memory_context,
-                "rule_context": rule_context,
-            },
-        )
         return scenario_context, entity_context, clue_context, memory_context, rule_context
+
+
+@contextmanager
+def null_trace_step():
+    state: dict[str, Any] = {}
+    yield state

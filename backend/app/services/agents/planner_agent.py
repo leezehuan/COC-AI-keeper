@@ -27,6 +27,7 @@
 # =============================================================================
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any
 
 from app.services.agents.base import AgentContext, AgentMessage, BaseAgent
@@ -39,6 +40,7 @@ from app.services.agents.utils import (
     normalize_turn_plan,
     to_int,
 )
+from app.services.agent_monitor import AgentTraceRecorder
 from app.services.debug_events import DebugEmitter, emit_debug
 from app.services.prompt_config import build_turn_plan_prompt
 from app.services.skills import SKILL_SPECS
@@ -110,7 +112,21 @@ class PlannerAgent(BaseAgent):
         intent: dict[str, Any] = payload.get("intent", {})  # intent = 结构化意图
         player_input: str = payload.get("player_input", "")  # player_input = 玩家输入
         debug_emit: DebugEmitter | None = payload.get("debug_emit")  # debug_emit = 调试发射器
+        trace_recorder: AgentTraceRecorder | None = payload.get("trace_recorder")
 
+        with (trace_recorder.step(agent_name=self.name, step_name="run", phase="plan", input_payload=payload) if trace_recorder else null_trace_step()) as trace_step:
+            result = self._run_impl(visible_context, intent, player_input, debug_emit, trace_recorder)
+            trace_step["output"] = result
+            return result
+
+    def _run_impl(
+        self,
+        visible_context: dict[str, Any],
+        intent: dict[str, Any],
+        player_input: str,
+        debug_emit: DebugEmitter | None,
+        trace_recorder: AgentTraceRecorder | None,
+    ) -> AgentMessage:
         emit_debug(debug_emit, phase="agent_node", name="PlannerAgent", status="start", message="PlannerAgent 开始生成回合计划。")
 
         # 构建回退计划：LLM 失败时使用
@@ -134,7 +150,9 @@ class PlannerAgent(BaseAgent):
         )
 
         try:
-            generated = self.context.llm.chat_json(prompt, fallback=fallback)  # generated = LLM生成结果：LLM返回的回合计划
+            with (trace_recorder.step(agent_name=self.name, step_name="generate_plan", phase="agent_step", input_payload={"prompt": prompt, "fallback": fallback, "visible_context": visible_context, "intent": intent, "player_input": player_input}) if trace_recorder else null_trace_step()) as trace_step:
+                generated = self.context.llm.chat_json(prompt, fallback=fallback)  # generated = LLM生成结果：LLM返回的回合计划
+                trace_step["output"] = generated
         except Exception as exc:
             emit_debug(debug_emit, phase="agent_node", name="PlannerAgent", status="error", message=str(exc)[:500])
             generated = fallback  # LLM 失败时使用回退计划
@@ -198,3 +216,9 @@ class PlannerAgent(BaseAgent):
             },
             context_summary=f"计划：{plan.get('goal', '')}，需要澄清：{needs_clarification}",
         )
+
+
+@contextmanager
+def null_trace_step():
+    state: dict[str, Any] = {}
+    yield state

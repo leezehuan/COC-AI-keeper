@@ -103,6 +103,53 @@ class GameSession(Base):
     flags: Mapped[list["StoryFlag"]] = relationship(back_populates="session", cascade="all, delete-orphan")
 
 
+class AgentTraceRun(Base):
+    """Agent 监控运行：一次玩家行动或助手请求对应一条 run 记录。"""
+    __tablename__ = "agent_trace_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    source: Mapped[str] = mapped_column(String(50), nullable=False)  # action / assistant
+    status: Mapped[str] = mapped_column(String(50), default="running", nullable=False)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default=dict, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    records: Mapped[list["AgentTraceRecord"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+
+
+class AgentTraceRecord(Base):
+    """Agent 监控步骤：保存每个 Agent/Skill/Tool/LLM 步骤的输入输出。"""
+    __tablename__ = "agent_trace_records"
+    __table_args__ = (UniqueConstraint("run_id", "sequence", name="uq_agent_trace_run_sequence"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent_trace_runs.id"), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    source: Mapped[str] = mapped_column(String(50), nullable=False)
+    agent_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    step_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    phase: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    input_payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    output_payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    run: Mapped[AgentTraceRun] = relationship(back_populates="records")
+
+
+class AgentTraceSettings(Base):
+    """Agent 监控配置，目前使用单行全局配置控制记录上限。"""
+    __tablename__ = "agent_trace_settings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default="global")
+    max_records: Mapped[int] = mapped_column(Integer, default=5000, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class TurnLog(Base):
     """回合日志：记录每个回合的完整信息，包括玩家输入、意图、检索结果、骰点和叙事。
     这是守秘人 Agent 的"审计记录"，可用于调试和回放。

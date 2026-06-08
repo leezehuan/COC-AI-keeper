@@ -1,4 +1,16 @@
-import type { ActionResponse, ActionStreamEvent, AssistantChatResponse, AssistantMode, AssistantStreamEvent, Character, GameSession } from './types';
+import type {
+  ActionResponse,
+  ActionStreamEvent,
+  AgentMonitorEvent,
+  AgentTraceRecord,
+  AgentTraceRun,
+  AgentTraceSettings,
+  AssistantChatResponse,
+  AssistantMode,
+  AssistantStreamEvent,
+  Character,
+  GameSession,
+} from './types';
 
 // =============================================================================
 // 【前端 API 封装层】
@@ -74,8 +86,44 @@ export const api = {
     streamRequest(`${apiBase}/assistant/chat/stream`, {
       method: 'POST',
       body: JSON.stringify(payload)
-    }, onEvent)
+    }, onEvent),
+  monitorSettings: () => request<AgentTraceSettings>(`${apiBase}/monitor/settings`),
+  updateMonitorSettings: (maxRecords: number) =>
+    request<AgentTraceSettings>(`${apiBase}/monitor/settings`, {
+      method: 'PUT',
+      body: JSON.stringify({ max_records: maxRecords })
+    }),
+  monitorRuns: (filters: MonitorRunFilters = {}) =>
+    request<AgentTraceRun[]>(`${apiBase}/monitor/runs${queryString(filters)}`),
+  monitorRecords: (filters: MonitorRecordFilters = {}) =>
+    request<AgentTraceRecord[]>(`${apiBase}/monitor/records${queryString(filters)}`),
+  deleteMonitorRecord: (recordId: string) =>
+    request<{ status: string; deleted: number }>(`${apiBase}/monitor/records/${recordId}`, { method: 'DELETE' }),
+  deleteMonitorRun: (runId: string) =>
+    request<{ status: string; deleted_runs: number; deleted_records: number }>(`${apiBase}/monitor/runs/${runId}`, { method: 'DELETE' }),
+  deleteMonitorRecords: (filters: MonitorRecordFilters = {}) =>
+    request<{ status: string; deleted: number }>(`${apiBase}/monitor/records${queryString(filters)}`, { method: 'DELETE' }),
+  streamMonitorEvents: (onEvent: (event: AgentMonitorEvent) => void, signal?: AbortSignal) =>
+    streamGet(`${apiBase}/monitor/events/stream`, onEvent, signal)
 };
+
+export interface MonitorRunFilters {
+  session_id?: string;
+  source?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface MonitorRecordFilters {
+  run_id?: string;
+  session_id?: string;
+  agent_name?: string;
+  source?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+}
 
 export interface AssistantChatPayload {
   session_id?: string | null;        // 当前会话 ID（可选，绑定会话时可检索会话记忆）
@@ -122,4 +170,18 @@ async function streamRequest<TEvent>(url: string, options: RequestInit, onEvent:
   }
   const remaining = buffer.trim();
   if (remaining) onEvent(JSON.parse(remaining) as TEvent);
+}
+
+async function streamGet<TEvent>(url: string, onEvent: (event: TEvent) => void, signal?: AbortSignal): Promise<void> {
+  return streamRequest<TEvent>(url, { method: 'GET', headers: {}, signal }, onEvent);
+}
+
+function queryString(filters: object): string {
+  const params = new URLSearchParams();
+  Object.entries(filters as Record<string, unknown>).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return;
+    params.set(key, String(value));
+  });
+  const text = params.toString();
+  return text ? `?${text}` : '';
 }

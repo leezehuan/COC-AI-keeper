@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # psycopg 是 PostgreSQL 的异步驱动，+psycopg 表示使用该驱动
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/coc_lite"
     # CORS 允许的前端来源地址，多个用逗号分隔（开发时是 Vite 的 5173 端口）
-    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174"
 
     # ===== LLM（大语言模型）配置 =====
     # 使用 OpenAI 兼容接口，可以接入任何兼容 OpenAI API 格式的模型服务

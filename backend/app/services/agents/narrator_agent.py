@@ -27,6 +27,7 @@
 # =============================================================================
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any
 
 from app.services.agents.base import AgentContext, AgentMessage, BaseAgent
@@ -40,6 +41,7 @@ from app.services.agents.utils import (
     format_location_names,
     should_offer_clue_hint,
 )
+from app.services.agent_monitor import AgentTraceRecorder
 from app.services.debug_events import DebugEmitter, emit_debug
 from app.services.prompt_config import build_keeper_response_prompt
 from app.services.story_state import build_turn_delta
@@ -137,7 +139,33 @@ class NarratorAgent(BaseAgent):
         rule_context: list[dict[str, Any]] = payload.get("rule_context", [])
         story_state: dict[str, Any] = payload.get("story_state", {})
         debug_emit: DebugEmitter | None = payload.get("debug_emit")
+        trace_recorder: AgentTraceRecorder | None = payload.get("trace_recorder")
 
+        with (trace_recorder.step(agent_name=self.name, step_name="run", phase="narrate", input_payload=payload) if trace_recorder else null_trace_step()) as trace_step:
+            result = self._run_impl(payload, session, character, player_input, intent, adjudication, resolution, skill_checks, sanity_checks, scenario_context, entity_context, clue_context, memory_context, rule_context, story_state, debug_emit, trace_recorder)
+            trace_step["output"] = result
+            return result
+
+    def _run_impl(
+        self,
+        payload: dict[str, Any],
+        session: Any,
+        character: Any,
+        player_input: str,
+        intent: dict[str, Any],
+        adjudication: dict[str, Any],
+        resolution: dict[str, Any],
+        skill_checks: list[dict[str, Any]],
+        sanity_checks: list[dict[str, Any]],
+        scenario_context: list[dict[str, Any]],
+        entity_context: list[dict[str, Any]],
+        clue_context: list[dict[str, Any]],
+        memory_context: list[dict[str, Any]],
+        rule_context: list[dict[str, Any]],
+        story_state: dict[str, Any],
+        debug_emit: DebugEmitter | None,
+        trace_recorder: AgentTraceRecorder | None,
+    ) -> AgentMessage:
         emit_debug(debug_emit, phase="agent_node", name="NarratorAgent", status="start", message="NarratorAgent 开始生成叙事。")
 
         # ===== 格式化上下文文本 =====
@@ -182,7 +210,9 @@ class NarratorAgent(BaseAgent):
         )
 
         try:
-            generated = self.context.llm.chat_json(prompt, fallback=fb)  # LLM 生成叙事
+            with (trace_recorder.step(agent_name=self.name, step_name="generate_narration", phase="agent_step", input_payload={"prompt": prompt, "fallback": fb, "player_input": player_input, "intent": intent, "resolution": resolution}) if trace_recorder else null_trace_step()) as trace_step:
+                generated = self.context.llm.chat_json(prompt, fallback=fb)  # LLM 生成叙事
+                trace_step["output"] = generated
         except Exception as exc:
             emit_debug(debug_emit, phase="agent_node", name="NarratorAgent", status="error", message=str(exc)[:500])
             generated = fb  # LLM 失败时使用回退
@@ -264,6 +294,15 @@ class NarratorAgent(BaseAgent):
         """
         payload = envelope.get("payload", {})
         repair_instruction: str = payload.get("repair_instruction", "")
+        trace_recorder: AgentTraceRecorder | None = payload.get("trace_recorder")
         # 复用大部分上下文重新生成
-        result = self.run(envelope)
-        return result
+        with (trace_recorder.step(agent_name=self.name, step_name="repair", phase="narrate", input_payload={"repair_instruction": repair_instruction, "payload": payload}) if trace_recorder else null_trace_step()) as trace_step:
+            result = self.run(envelope)
+            trace_step["output"] = result
+            return result
+
+
+@contextmanager
+def null_trace_step():
+    state: dict[str, Any] = {}
+    yield state

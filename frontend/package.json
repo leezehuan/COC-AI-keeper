@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:monitor": "vite --host 127.0.0.1 --port 5174 --open /coc/monitor.html",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },

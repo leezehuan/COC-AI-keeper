@@ -4,13 +4,21 @@ from collections.abc import Iterator
 from queue import Queue
 from threading import Thread
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, selectinload
 
 from app import models, schemas
 from app.config import get_settings
 from app.database import SessionLocal, get_db, init_db
+from app.services.agent_monitor import (
+    cleanup_empty_runs,
+    create_trace_run,
+    finish_trace_run,
+    get_monitor_settings_payload,
+    monitor_event_stream,
+    update_monitor_settings,
+)
 from app.services.agents import KeeperSupervisor
 from app.services.assistant_agent import GameAssistantAgent
 from app.services.characters import ensure_character_attributes
@@ -150,7 +158,13 @@ def submit_action(session_id: str, payload: schemas.PlayerActionIn, db: Session 
     if db.get(models.GameSession, session_id) is None:
         raise HTTPException(status_code=404, detail="未找到指定会话")
     # 非流式接口直接等待守秘人完整回合执行完毕后返回。
-    result = get_agent().run_turn(db, session_id, payload.message)
+    trace_recorder = create_trace_run(session_id=session_id, source="action", metadata={"stream": False, "message": payload.message})
+    try:
+        result = get_agent().run_turn(db, session_id, payload.message, trace_recorder=trace_recorder)
+        finish_trace_run(trace_recorder, "success")
+    except Exception as exc:
+        finish_trace_run(trace_recorder, "error", str(exc))
+        raise
     if result.get("needs_image"):
         session = db.get(models.GameSession, session_id)
         if session and session.turn_logs:
@@ -165,7 +179,12 @@ def submit_action(session_id: str, payload: schemas.PlayerActionIn, db: Session 
 
 @router.post("/sessions/{session_id}/actions/stream")
 def submit_action_stream(session_id: str, payload: schemas.PlayerActionIn, db: Session = Depends(get_db)) -> StreamingResponse:
-    # 【Web 流程 10】流式行动接口：玩家输入会在这里进入 KeeperAgent，也就是 LangGraph 回合链路。
+    # 【Web 流程 10】流式行动接口：玩家输入会在这里进入 KeeperSupervisor，也就是当前多 Agent 回合链路。
+    # 对学习者来说，这个接口很值得精读，因为它把“Web 请求”和“Agent 回合”真正接了起来：
+    # 1. 浏览器发来一句玩家输入。
+    # 2. 这里开启后台线程运行 Supervisor。
+    # 3. Supervisor 在执行过程中不断把调试事件放进队列。
+    # 4. event_stream() 再把这些事件编码成 NDJSON，持续推给前端。
     if db.get(models.GameSession, session_id) is None:
         raise HTTPException(status_code=404, detail="未找到指定会话")
 
@@ -180,12 +199,17 @@ def submit_action_stream(session_id: str, payload: schemas.PlayerActionIn, db: S
 
             def run_agent() -> None:
                 worker_db = SessionLocal()
+                trace_recorder = create_trace_run(session_id=session_id, source="action", metadata={"stream": True, "message": payload.message})
                 try:
+                    # 这里单独创建 worker_db，而不是复用外层 db。
+                    # 原因是回合执行发生在后台线程中，数据库会话最好在线程内创建和关闭，
+                    # 这样更容易避免线程间共享 Session 带来的问题。
                     emit_debug(enqueue_debug, phase="stream", name="action_stream", status="start", message="守秘人回合开始。")
-                    result = get_agent().run_turn(worker_db, session_id, payload.message, debug_emit=enqueue_debug)
+                    result = get_agent().run_turn(worker_db, session_id, payload.message, debug_emit=enqueue_debug, trace_recorder=trace_recorder)
                     response = build_action_response(worker_db, session_id, result)
                     emit_debug(enqueue_debug, phase="stream", name="action_stream", status="success", message="守秘人回合完成。")
                     events.put({"type": "result", "response": response.model_dump(mode="json")})
+                    finish_trace_run(trace_recorder, "success")
                     if result.get("needs_image"):
                         session = worker_db.get(models.GameSession, session_id)
                         if session and session.turn_logs:
@@ -197,6 +221,7 @@ def submit_action_stream(session_id: str, payload: schemas.PlayerActionIn, db: S
                             else:
                                 emit_debug(enqueue_debug, phase="stream", name="image_generation", status="warning", message="图片生成失败或配置未启用。")
                 except Exception as exc:
+                    finish_trace_run(trace_recorder, "error", str(exc))
                     events.put({"type": "error", "detail": str(exc)})
                 finally:
                     worker_db.close()
@@ -209,6 +234,8 @@ def submit_action_stream(session_id: str, payload: schemas.PlayerActionIn, db: S
                     break
                 if event.get("type") == "result":
                     response_payload = event["response"]
+                    # final 事件里会带完整 ActionResponse，但在此之前我们先把 narration 切成小块发送。
+                    # 这样前端可以模拟“正在打字”的流式体验，而不必等整个回合结束后一次性显示全文。
                     for chunk in split_stream_text(str(response_payload.get("narration", ""))):
                         yield encode_stream_event({"type": "chunk", "content": chunk})
                         time.sleep(0.015)
@@ -232,17 +259,25 @@ def submit_action_stream(session_id: str, payload: schemas.PlayerActionIn, db: S
 def assistant_chat(payload: schemas.AssistantChatRequest, db: Session = Depends(get_db)) -> dict:
     if payload.session_id and db.get(models.GameSession, payload.session_id) is None:
         raise HTTPException(status_code=404, detail="未找到指定会话")
-    return get_assistant_agent().chat(
-        db,
-        message=payload.message,
-        session_id=payload.session_id,
-        mode=payload.mode,
-        enable_mqe=payload.enable_mqe,
-        mqe_expansions=payload.mqe_expansions,
-        enable_hyde=payload.enable_hyde,
-        top_k=payload.top_k,
-        candidate_pool_multiplier=payload.candidate_pool_multiplier,
-    )
+    trace_recorder = create_trace_run(session_id=payload.session_id, source="assistant", metadata={"stream": False, "message": payload.message})
+    try:
+        result = get_assistant_agent().chat(
+            db,
+            message=payload.message,
+            session_id=payload.session_id,
+            mode=payload.mode,
+            enable_mqe=payload.enable_mqe,
+            mqe_expansions=payload.mqe_expansions,
+            enable_hyde=payload.enable_hyde,
+            top_k=payload.top_k,
+            candidate_pool_multiplier=payload.candidate_pool_multiplier,
+            trace_recorder=trace_recorder,
+        )
+        finish_trace_run(trace_recorder, "success")
+        return result
+    except Exception as exc:
+        finish_trace_run(trace_recorder, "error", str(exc))
+        raise
 
 
 @router.post("/assistant/chat/stream")
@@ -260,6 +295,7 @@ def assistant_chat_stream(payload: schemas.AssistantChatRequest, db: Session = D
 
             def run_assistant() -> None:
                 worker_db = SessionLocal()
+                trace_recorder = create_trace_run(session_id=payload.session_id, source="assistant", metadata={"stream": True, "message": payload.message})
                 try:
                     emit_debug(enqueue_debug, phase="stream", name="assistant_stream", status="start", message="助手请求开始。")
                     result = get_assistant_agent().chat(
@@ -273,10 +309,13 @@ def assistant_chat_stream(payload: schemas.AssistantChatRequest, db: Session = D
                         top_k=payload.top_k,
                         candidate_pool_multiplier=payload.candidate_pool_multiplier,
                         debug_emit=enqueue_debug,
+                        trace_recorder=trace_recorder,
                     )
                     emit_debug(enqueue_debug, phase="stream", name="assistant_stream", status="success", message="助手请求完成。")
                     events.put({"type": "result", "response": result})
+                    finish_trace_run(trace_recorder, "success")
                 except Exception as exc:
+                    finish_trace_run(trace_recorder, "error", str(exc))
                     events.put({"type": "error", "detail": str(exc)})
                 finally:
                     worker_db.close()
@@ -306,12 +345,134 @@ def assistant_chat_stream(payload: schemas.AssistantChatRequest, db: Session = D
     )
 
 
+@router.get("/monitor/settings", response_model=schemas.AgentTraceSettingsOut)
+def get_monitor_settings(db: Session = Depends(get_db)) -> dict[str, int]:
+    return get_monitor_settings_payload(db)
+
+
+@router.put("/monitor/settings", response_model=schemas.AgentTraceSettingsOut)
+def put_monitor_settings(payload: schemas.AgentTraceSettingsUpdate, db: Session = Depends(get_db)) -> dict[str, int]:
+    return update_monitor_settings(db, payload.max_records)
+
+
+@router.get("/monitor/runs", response_model=list[schemas.AgentTraceRunOut])
+def list_monitor_runs(
+    session_id: str | None = None,
+    source: str | None = None,
+    status: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> list[models.AgentTraceRun]:
+    query = db.query(models.AgentTraceRun)
+    if session_id:
+        query = query.filter(models.AgentTraceRun.session_id == session_id)
+    if source:
+        query = query.filter(models.AgentTraceRun.source == source)
+    if status:
+        query = query.filter(models.AgentTraceRun.status == status)
+    return query.order_by(models.AgentTraceRun.started_at.desc()).offset(offset).limit(limit).all()
+
+
+@router.get("/monitor/records", response_model=list[schemas.AgentTraceRecordOut])
+def list_monitor_records(
+    run_id: str | None = None,
+    session_id: str | None = None,
+    agent_name: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> list[models.AgentTraceRecord]:
+    query = build_monitor_record_query(db, run_id=run_id, session_id=session_id, agent_name=agent_name, status=status, source=source)
+    return query.order_by(models.AgentTraceRecord.created_at.desc(), models.AgentTraceRecord.sequence.desc()).offset(offset).limit(limit).all()
+
+
+@router.get("/monitor/events/stream")
+def monitor_events_stream() -> StreamingResponse:
+    def event_stream() -> Iterator[str]:
+        for event in monitor_event_stream():
+            yield encode_stream_event(event)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
+
+
+@router.delete("/monitor/records/{record_id}")
+def delete_monitor_record(record_id: str, db: Session = Depends(get_db)) -> dict[str, int | str]:
+    record = db.get(models.AgentTraceRecord, record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="未找到指定监控记录")
+    db.delete(record)
+    db.commit()
+    cleanup_empty_runs(db)
+    return {"status": "已删除", "deleted": 1}
+
+
+@router.delete("/monitor/runs/{run_id}")
+def delete_monitor_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, int | str]:
+    run = db.get(models.AgentTraceRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="未找到指定运行记录")
+    record_count = db.query(models.AgentTraceRecord).filter(models.AgentTraceRecord.run_id == run_id).count()
+    db.delete(run)
+    db.commit()
+    return {"status": "已删除", "deleted_runs": 1, "deleted_records": record_count}
+
+
+@router.delete("/monitor/records")
+def delete_monitor_records(
+    run_id: str | None = None,
+    session_id: str | None = None,
+    agent_name: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, int | str]:
+    query = build_monitor_record_query(db, run_id=run_id, session_id=session_id, agent_name=agent_name, status=status, source=source)
+    deleted = query.delete(synchronize_session=False)
+    db.commit()
+    cleanup_empty_runs(db)
+    return {"status": "已删除", "deleted": deleted}
+
+
+def build_monitor_record_query(
+    db: Session,
+    *,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    agent_name: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+):
+    query = db.query(models.AgentTraceRecord)
+    if run_id:
+        query = query.filter(models.AgentTraceRecord.run_id == run_id)
+    if session_id:
+        query = query.filter(models.AgentTraceRecord.session_id == session_id)
+    if agent_name:
+        query = query.filter(models.AgentTraceRecord.agent_name == agent_name)
+    if status:
+        query = query.filter(models.AgentTraceRecord.status == status)
+    if source:
+        query = query.filter(models.AgentTraceRecord.source == source)
+    return query
+
+
 def _scene_type_to_aspect_ratio(scene_type: str) -> str:
     return "16:9" if scene_type == "new_scene" else "1:1"
 
 
 def build_action_response(db: Session, session_id: str, result: dict) -> schemas.ActionResponse:
     # Agent 的内部状态较大，这里只整理前端需要展示和持久化的公开字段。
+    # 可以把它理解成“后端 ViewModel 组装层”：
+    # - Supervisor 返回的是偏内部的运行结果
+    # - 前端真正需要的是 ActionResponse 这个稳定结构
+    # 学习前后端对接时，建议把这里和 frontend/src/types.ts 里的 ActionResponse 对照着看。
     session_out = build_session_out(db, session_id)
     return schemas.ActionResponse(
         session=session_out,

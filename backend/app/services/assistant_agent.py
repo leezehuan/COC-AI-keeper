@@ -30,11 +30,13 @@
 # =============================================================================
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any, Literal
 
 from sqlalchemy.orm import Session, selectinload
 
 from app import models
+from app.services.agent_monitor import AgentTraceRecorder
 from app.services.assistant_prompts import build_assistant_prompt, build_hyde_prompt, build_mqe_prompt, format_assistant_context
 from app.services.debug_events import DebugEmitter, emit_debug
 from app.services.llm import LLMClient
@@ -95,6 +97,7 @@ class GameAssistantAgent:
         top_k: int = 5,
         candidate_pool_multiplier: int = 4,
         debug_emit: DebugEmitter | None = None,
+        trace_recorder: AgentTraceRecorder | None = None,
     ) -> dict[str, Any]:
         """游戏助手主入口（chat = 聊天/对话）。
 
@@ -131,6 +134,47 @@ class GameAssistantAgent:
         【返回值】
         - dict: 包含 answer（回答）、citations（引用）、mode（模式）等
         """
+        with (trace_recorder.step(agent_name="GameAssistantAgent", step_name="chat", phase="assistant", input_payload={
+            "message": message,
+            "session_id": session_id,
+            "mode": mode,
+            "enable_mqe": enable_mqe,
+            "mqe_expansions": mqe_expansions,
+            "enable_hyde": enable_hyde,
+            "top_k": top_k,
+            "candidate_pool_multiplier": candidate_pool_multiplier,
+        }) if trace_recorder else null_trace_step()) as trace_step:
+            result = self._chat_impl(
+                db,
+                message=message,
+                session_id=session_id,
+                mode=mode,
+                enable_mqe=enable_mqe,
+                mqe_expansions=mqe_expansions,
+                enable_hyde=enable_hyde,
+                top_k=top_k,
+                candidate_pool_multiplier=candidate_pool_multiplier,
+                debug_emit=debug_emit,
+                trace_recorder=trace_recorder,
+            )
+            trace_step["output"] = result
+            return result
+
+    def _chat_impl(
+        self,
+        db: Session,
+        *,
+        message: str,
+        session_id: str | None,
+        mode: AssistantMode,
+        enable_mqe: bool,
+        mqe_expansions: int,
+        enable_hyde: bool | None,
+        top_k: int,
+        candidate_pool_multiplier: int,
+        debug_emit: DebugEmitter | None,
+        trace_recorder: AgentTraceRecorder | None,
+    ) -> dict[str, Any]:
         effective_mode = infer_mode(message, mode)  # 推断助手模式
         emit_debug(debug_emit, phase="assistant", name="infer_mode", status="success", message=f"推断模式：{effective_mode}", metadata={"mode": effective_mode, "raw_mode": mode})
         session = load_session(db, session_id) if session_id else None  # 加载会话（可选）
@@ -139,23 +183,31 @@ class GameAssistantAgent:
             return spoiler_response(effective_mode)
         # MQE 查询扩展：生成多个语义等价的查询，提高检索召回率
         emit_debug(debug_emit, phase="assistant", name="expand_queries", status="start", message="开始 MQE 查询扩展。", metadata={"enable_mqe": enable_mqe, "mqe_expansions": mqe_expansions})
-        expanded_queries = self.expand_queries(message, enable_mqe, mqe_expansions)
+        with (trace_recorder.step(agent_name="GameAssistantAgent", step_name="expand_queries", phase="assistant", input_payload={"message": message, "enable_mqe": enable_mqe, "mqe_expansions": mqe_expansions}) if trace_recorder else null_trace_step()) as trace_step:
+            expanded_queries = self.expand_queries(message, enable_mqe, mqe_expansions)
+            trace_step["output"] = {"queries": expanded_queries}
         emit_debug(debug_emit, phase="assistant", name="expand_queries", status="success", message=f"查询扩展完成：{len(expanded_queries)} 条。", metadata={"queries": expanded_queries})
         # HyDE 假设文档：生成假设性回答文档，用其嵌入进行检索
-        hyde_text = self.generate_hyde(message, enable_hyde, effective_mode)
+        with (trace_recorder.step(agent_name="GameAssistantAgent", step_name="hyde", phase="assistant", input_payload={"message": message, "enable_hyde": enable_hyde, "mode": effective_mode}) if trace_recorder else null_trace_step()) as trace_step:
+            hyde_text = self.generate_hyde(message, enable_hyde, effective_mode)
+            trace_step["output"] = {"hyde_text": hyde_text}
         if hyde_text:
             expanded_queries.append(hyde_text)  # 将 HyDE 文档作为额外查询
             emit_debug(debug_emit, phase="assistant", name="hyde", status="success", message="HyDE 假设文档已生成。", metadata={"hyde_preview": hyde_text[:200]})
         # 多查询多集合检索
         emit_debug(debug_emit, phase="assistant", name="retrieve", status="start", message="开始检索规则与会话信息。", metadata={"collections": collections_for_mode(effective_mode, session), "top_k": top_k})
-        rows = self.retrieve(expanded_queries, effective_mode, session, top_k, candidate_pool_multiplier)
+        with (trace_recorder.step(agent_name="GameAssistantAgent", step_name="retrieve", phase="assistant", input_payload={"queries": expanded_queries, "mode": effective_mode, "session": session, "top_k": top_k, "candidate_pool_multiplier": candidate_pool_multiplier}) if trace_recorder else null_trace_step()) as trace_step:
+            rows = self.retrieve(expanded_queries, effective_mode, session, top_k, candidate_pool_multiplier)
+            trace_step["output"] = {"rows": rows, "result_count": len(rows)}
         emit_debug(debug_emit, phase="assistant", name="retrieve", status="success", message=f"检索完成：{len(rows)} 条结果。", metadata={"result_count": len(rows), "visible_rows": [{"id": r.get("id", ""), "distance": r.get("distance")} for r in rows[:10]]})
         # 构建会话上下文和 prompt
         session_context = build_session_context(session) if session else "未绑定当前会话。"
         prompt = build_assistant_prompt(message=message, mode=effective_mode, context=format_assistant_context(rows), session_context=session_context)
         fallback = build_fallback_answer(message, rows, effective_mode)  # 回退回答
         emit_debug(debug_emit, phase="assistant", name="generate_answer", status="start", message="开始生成助手回答。")
-        answer = self.llm.chat_text(prompt, temperature=0.2) or fallback  # 低温度生成
+        with (trace_recorder.step(agent_name="GameAssistantAgent", step_name="generate_answer", phase="assistant", input_payload={"prompt": prompt, "fallback": fallback}) if trace_recorder else null_trace_step()) as trace_step:
+            answer = self.llm.chat_text(prompt, temperature=0.2) or fallback  # 低温度生成
+            trace_step["output"] = {"answer": answer}
         answer, blocked = sanitize_assistant_answer(answer, session)  # 防剧透清洗
         emit_debug(debug_emit, phase="assistant", name="generate_answer", status="success", message=f"回答生成完成，{len(answer)} 字。", metadata={"spoiler_blocked": blocked, "answer_preview": answer[:200]})
         citations = build_citations(rows)  # 构建引用
@@ -552,3 +604,9 @@ def sanitize_assistant_answer(answer: str, session: models.GameSession | None) -
     if blocked:
         sanitized += "\n\n这部分可能涉及未发现内容，我已改为非剧透表述。"
     return sanitized, blocked
+
+
+@contextmanager
+def null_trace_step():
+    state: dict[str, Any] = {}
+    yield state
