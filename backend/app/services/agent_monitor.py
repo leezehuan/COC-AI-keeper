@@ -16,10 +16,14 @@ from app import models
 from app.database import SessionLocal
 
 
-DEFAULT_MAX_RECORDS = 5000
-MAX_STRING_LENGTH = 200_000
-MAX_CONTAINER_ITEMS = 200
-MAX_DEPTH = 8
+# 【Agent 监控核心配置】
+# 这些限制不是业务规则，而是“保护监控系统自己”的护栏。
+# Agent payload 里可能包含很长的 prompt、检索结果、ORM 对象甚至循环引用；
+# 如果不做限制，监控系统可能反过来拖慢或拖垮主游戏流程。
+DEFAULT_MAX_RECORDS = 5000  # 默认最多保存多少条步骤记录
+MAX_STRING_LENGTH = 200_000  # 单个字符串字段的最大保存长度
+MAX_CONTAINER_ITEMS = 200  # 单个 list/dict/set 最多展开多少项
+MAX_DEPTH = 8  # 嵌套对象最多递归多少层
 _SKIP_KEYS = {"db", "debug_emit", "trace_recorder", "client", "llm", "retrieval"}
 _event_subscribers: set[Queue] = set()
 _event_lock = threading.Lock()
@@ -28,7 +32,22 @@ _run_sequences: dict[str, int] = {}
 
 
 class AgentTraceRecorder:
-    """Best-effort recorder for one action or assistant request."""
+    """一次 action / assistant 请求的监控记录器。
+
+    【中文名称】Agent 追踪记录器
+
+    【功能说明】
+    这个对象会被 `api.py` 创建，然后沿着 `trace_recorder` 参数传给
+    Supervisor、各 Agent、Skill 和 Tool。
+
+    学习时可以这样理解：
+    - AgentTraceRun = 一次完整请求
+    - AgentTraceRecorder = 这次请求的“记录笔”
+    - AgentTraceRecord = 记录笔写下的一行步骤日志
+
+    重要设计：best-effort。
+    监控写入失败时不会影响主流程，所以 recorder 内部大多数错误都会被吞掉。
+    """
 
     def __init__(self, run_id: str | None, session_id: str | None, source: str) -> None:
         self.run_id = run_id
@@ -48,6 +67,17 @@ class AgentTraceRecorder:
         phase: str,
         input_payload: Any = None,
     ) -> Iterator[dict[str, Any]]:
+        """记录一个步骤的输入、输出、耗时和异常。
+
+        用法：
+
+            with recorder.step(..., input_payload=payload) as trace_step:
+                result = do_work()
+                trace_step["output"] = result
+
+        这个模式很适合 Agent 项目，因为 Agent 步骤通常是：
+        输入上下文 -> 调 LLM/Tool -> 得到输出。
+        """
         state: dict[str, Any] = {"output": None}
         started = time.perf_counter()
         error = None
@@ -100,6 +130,15 @@ class AgentTraceRecorder:
 
 
 def create_trace_run(*, session_id: str | None, source: str, metadata: dict[str, Any] | None = None) -> AgentTraceRecorder:
+    """创建一次监控 run，并返回对应 recorder。
+
+    【调用位置】
+    - 玩家行动：`backend/app/api.py` 的 actions/actions stream
+    - 游戏助手：`backend/app/api.py` 的 assistant/chat
+
+    如果数据库不可用或写入失败，返回一个 disabled recorder。
+    这样主业务仍然可以继续执行。
+    """
     try:
         db = SessionLocal()
         try:
@@ -123,6 +162,14 @@ def create_trace_run(*, session_id: str | None, source: str, metadata: dict[str,
 
 
 def finish_trace_run(recorder: AgentTraceRecorder | None, status: str, error: str | None = None) -> None:
+    """结束一次监控 run。
+
+    status 通常是：
+    - success：主流程正常完成
+    - error：主流程抛出异常
+
+    注意：这个函数只更新监控状态，不负责业务事务提交。
+    """
     if recorder is None or not recorder.run_id:
         return
     try:
@@ -160,6 +207,16 @@ def record_trace_step(
     error: str | None = None,
     duration_ms: int | None = None,
 ) -> None:
+    """写入一条步骤记录。
+
+    这是 `AgentTraceRecorder.record()` 最终调用的底层函数。
+    它会：
+    1. 给当前 run 分配 sequence
+    2. 安全序列化输入输出
+    3. 写入 `agent_trace_records`
+    4. 推送实时事件给监控页
+    5. 执行全局保留条数裁剪
+    """
     try:
         db = SessionLocal()
         try:
@@ -196,6 +253,20 @@ def next_sequence(run_id: str) -> int:
 
 
 def safe_serialize(value: Any, *, _depth: int = 0, _seen: set[int] | None = None) -> Any:
+    """把任意 Python 对象转换成可写入 JSONB 的安全结构。
+
+    为什么不能直接 `json.dumps(value)`？
+    因为 Agent payload 里经常有：
+    - SQLAlchemy Session
+    - ORM 对象
+    - 函数回调
+    - LLM/Retrieval 客户端
+    - 超长 prompt
+    - 循环引用
+
+    这个函数的目标不是“完美还原对象”，而是“尽量保留学习有用的信息，
+    同时保证监控系统不会因为对象太复杂而失败”。
+    """
     if _seen is None:
         _seen = set()
     if _depth > MAX_DEPTH:
@@ -293,6 +364,13 @@ def update_monitor_settings(db: Session, max_records: int) -> dict[str, int]:
 
 
 def enforce_retention(db: Session) -> None:
+    """执行全局记录上限。
+
+    当步骤记录数量超过 `agent_trace_settings.max_records` 时，
+    删除最旧的 record。随后清理已经结束且没有任何 record 的 run。
+
+    这就是监控页里“存储条数上限”的后端实现。
+    """
     settings = get_settings_row(db)
     max_records = max(0, int(settings.max_records))
     count = db.query(models.AgentTraceRecord).count()
@@ -348,6 +426,12 @@ def subscribe_monitor_events() -> Iterator[Queue]:
 
 
 def monitor_event_stream() -> Iterator[dict[str, Any]]:
+    """实时监控事件流。
+
+    FastAPI 会把这里 yield 的 dict 编码成 NDJSON。
+    监控前端 `frontend/src/monitor.tsx` 会保持一个 fetch 连接，
+    每收到一行 JSON 就立即更新 Runs 或 Records 列表。
+    """
     with subscribe_monitor_events() as queue:
         yield {"type": "start", "timestamp": datetime.now(timezone.utc).isoformat()}
         while True:

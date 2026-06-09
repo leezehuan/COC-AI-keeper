@@ -122,89 +122,151 @@ def run_generic_skill(*, spec: SkillSpec, state: dict[str, Any], runtime: dict[s
     【返回值】
     - SkillResult: 包含所有 Tool 观察结果和决策摘要
     """
-    allowed_tools = set(runtime.get("allowed_tools") or [])  # 当前 Skill 允许使用的 Tool 白名单
-    observations: list[dict[str, Any]] = []  # 收集所有 Tool 的观察结果
-    session = state["session"]  # GameSession ORM 对象
-    character = state["character"]  # Character ORM 对象
-    intent = state.get("intent", {})  # 结构化意图
-    query = build_skill_query(state)  # 构建检索查询文本
-    debug_emit = runtime.get("debug_emit")  # 调试事件发射器
-    trace_recorder: AgentTraceRecorder | None = runtime.get("trace_recorder")  # 监控记录器
+    # 1. 从 runtime 中读取当前计划允许使用的 Tool 名称列表，并转成 set 方便快速判断。
+    allowed_tools = set(runtime.get("allowed_tools") or [])  # allowed_tools = Tool 白名单，PlannerAgent 校验后传入
+    # 2. 创建观察结果列表；每个 Tool 执行完都会把 ToolObservation.as_dict() 追加到这里。
+    observations: list[dict[str, Any]] = []  # observations = 本 Skill 调用过的所有 Tool 观察记录
+    # 3. 从 state 中取出当前游戏会话；Tool 需要从里面读取地点、物品栏、线索等信息。
+    session = state["session"]  # session = GameSession ORM 对象，包含当前地点、物品、线索、日志等关联数据
+    # 4. 从 state 中取出当前角色；RuleCheckTool 需要读取技能值、属性、SAN、幸运等字段。
+    character = state["character"]  # character = Character ORM 对象，提供角色卡数据
+    # 5. 读取结构化意图；里面通常包含 action_type、target、skill、reason 等字段。
+    intent = state.get("intent", {})  # intent = ContextAgent 解析出的玩家行动意图
+    # 6. 构建检索查询文本；ContextSearchTool 和 MemoryRecallTool 都会用这个 query 做向量检索。
+    query = build_skill_query(state)  # query = 拼接地点、场景、玩家输入、目标和技能名得到的检索文本
+    # 7. 读取调试事件回调；run_tool_with_debug 会用它把 Tool 状态推送给前端调试面板。
+    debug_emit = runtime.get("debug_emit")  # debug_emit = 调试事件发射器，可为 None
+    # 8. 读取 Agent 监控记录器；如果存在，就把每个 Tool 调用写入 /monitor 可查看的 trace。
+    trace_recorder: AgentTraceRecorder | None = runtime.get("trace_recorder")  # trace_recorder = Agent 调用链记录器，可为 None
 
     # ===== 1. 上下文检索 =====
+    # 9. 只有当计划白名单允许 ContextSearchTool，且 runtime 提供了 retrieval 服务时，才执行上下文检索。
     if "ContextSearchTool" in allowed_tools and runtime.get("retrieval") is not None:
-        run_tool_with_debug(
-            debug_emit, observations, "ContextSearchTool", "开始检索上下文。",
-            lambda: run_context_search(
-                retrieval=runtime["retrieval"], query=query,
-                collections=runtime.get("collections") or DEFAULT_COLLECTIONS,
-                n_results=int(runtime.get("n_results") or 3),
+        run_tool_with_debug(  # 10. 用统一包装器执行 Tool，自动记录调试事件和观察结果
+            debug_emit,  # debug_emit = 调试事件回调
+            observations,  # observations = 收集 ToolObservation 的列表，会被原地追加
+            "ContextSearchTool",  # tool_name = 当前执行的 Tool 名称
+            "开始检索上下文。",  # start_message = 前端调试面板显示的开始消息
+            lambda: run_context_search(  # handler = 真正执行 Chroma 检索的无参函数
+                retrieval=runtime["retrieval"],  # retrieval = RetrievalService 实例，封装 Chroma 查询
+                query=query,  # query = 上面构造的检索文本
+                collections=runtime.get("collections") or DEFAULT_COLLECTIONS,  # collections = 要查的向量集合，缺省使用剧本/实体/线索/规则
+                n_results=int(runtime.get("n_results") or 3),  # n_results = 每个集合最多返回多少条
             ),
-            start_metadata={"query": query, "collections": runtime.get("collections") or DEFAULT_COLLECTIONS},
-            trace_recorder=trace_recorder,
+            start_metadata={  # start_metadata = 写入调试事件和 trace 的输入摘要
+                "query": query,  # query = 本次检索文本
+                "collections": runtime.get("collections") or DEFAULT_COLLECTIONS,  # collections = 本次检索集合
+            },
+            trace_recorder=trace_recorder,  # trace_recorder = 可选监控记录器
         )
 
     # ===== 2. 物品栏查询 =====
+    # 11. 如果计划允许 InventoryLookupTool，就查询当前会话物品栏。
     if "InventoryLookupTool" in allowed_tools:
-        run_tool_with_debug(
-            debug_emit, observations, "InventoryLookupTool", "开始查询物品栏。",
-            lambda: run_inventory_lookup(items=getattr(session, "inventory_items", []), query=str(intent.get("target") or "")),
-            start_metadata={"target": str(intent.get("target") or "")},
-            trace_recorder=trace_recorder,
+        run_tool_with_debug(  # 12. 统一执行物品栏查询 Tool，并收集观察结果
+            debug_emit,  # debug_emit = 调试事件回调
+            observations,  # observations = Tool 观察结果列表
+            "InventoryLookupTool",  # tool_name = 物品栏查询 Tool
+            "开始查询物品栏。",  # start_message = 调试面板展示文本
+            lambda: run_inventory_lookup(  # handler = 真正执行物品栏过滤/查询的函数
+                items=getattr(session, "inventory_items", []),  # items = 当前会话物品列表，没有该属性时回退空列表
+                query=str(intent.get("target") or ""),  # query = 玩家行动目标，用于在物品名/描述中匹配
+            ),
+            start_metadata={"target": str(intent.get("target") or "")},  # start_metadata = 记录本次查询目标
+            trace_recorder=trace_recorder,  # trace_recorder = 可选监控记录器
         )
 
     # ===== 3. 场景可交互信息 =====
+    # 13. 如果计划允许 SceneAffordanceTool，就读取当前地点有哪些可交互对象和可前往地点。
     if "SceneAffordanceTool" in allowed_tools:
-        run_tool_with_debug(
-            debug_emit, observations, "SceneAffordanceTool", "开始读取场景可交互信息。",
-            lambda: run_scene_affordance(location_context=state.get("entity_context", []), story_state=state.get("story_state", {})),
-            start_metadata={"location": getattr(session, "current_location", "")},
-            trace_recorder=trace_recorder,
+        run_tool_with_debug(  # 14. 统一执行场景可交互查询 Tool
+            debug_emit,  # debug_emit = 调试事件回调
+            observations,  # observations = Tool 观察结果列表
+            "SceneAffordanceTool",  # tool_name = 场景可交互信息 Tool
+            "开始读取场景可交互信息。",  # start_message = 调试面板展示文本
+            lambda: run_scene_affordance(  # handler = 从实体上下文和 story_state 中提取 affordance
+                location_context=state.get("entity_context", []),  # location_context = ContextAgent 检索到的地点/实体片段
+                story_state=state.get("story_state", {}),  # story_state = 当前长期剧情状态
+            ),
+            start_metadata={"location": getattr(session, "current_location", "")},  # start_metadata = 当前地点，便于调试定位
+            trace_recorder=trace_recorder,  # trace_recorder = 可选监控记录器
         )
 
     # ===== 4. 线索候选资格 =====
+    # 15. 如果计划允许 ClueEligibilityTool，就判断候选线索是否可能被当前行动发现。
     if "ClueEligibilityTool" in allowed_tools:
-        known_keys = [str(getattr(clue, "clue_key", "")) for clue in getattr(session, "clues", [])]  # 已发现线索的 key
-        run_tool_with_debug(
-            debug_emit, observations, "ClueEligibilityTool", "开始判断线索候选资格。",
-            lambda: run_clue_eligibility(target=str(intent.get("target") or ""), clue_context=state.get("clue_context", []), known_clue_keys=known_keys),
-            start_metadata={"target": str(intent.get("target") or ""), "known_clue_count": len(known_keys)},
-            trace_recorder=trace_recorder,
+        # 16. 提取当前会话已发现线索的 key，用于避免重复发现同一条线索。
+        known_keys = [str(getattr(clue, "clue_key", "")) for clue in getattr(session, "clues", [])]  # known_keys = 已发现线索 key 列表
+        run_tool_with_debug(  # 17. 统一执行线索候选资格判断 Tool
+            debug_emit,  # debug_emit = 调试事件回调
+            observations,  # observations = Tool 观察结果列表
+            "ClueEligibilityTool",  # tool_name = 线索资格判断 Tool
+            "开始判断线索候选资格。",  # start_message = 调试面板展示文本
+            lambda: run_clue_eligibility(  # handler = 真正执行线索过滤和目标匹配的函数
+                target=str(intent.get("target") or ""),  # target = 玩家行动目标，如“脚印”“灯塔门口”
+                clue_context=state.get("clue_context", []),  # clue_context = ContextAgent 检索到的候选线索片段
+                known_clue_keys=known_keys,  # known_clue_keys = 已发现线索 key，用于去重
+            ),
+            start_metadata={  # start_metadata = 调试事件输入摘要
+                "target": str(intent.get("target") or ""),  # target = 本次判断的目标
+                "known_clue_count": len(known_keys),  # known_clue_count = 已发现线索数量
+            },
+            trace_recorder=trace_recorder,  # trace_recorder = 可选监控记录器
         )
 
     # ===== 5. 会话记忆召回 =====
+    # 18. 如果计划允许 MemoryRecallTool，且 retrieval 服务可用，就从 Chroma 召回本会话长期记忆。
     if "MemoryRecallTool" in allowed_tools and runtime.get("retrieval") is not None:
-        run_tool_with_debug(
-            debug_emit, observations, "MemoryRecallTool", "开始召回会话记忆。",
-            lambda: run_memory_recall(retrieval=runtime["retrieval"], query=query, session_id=session.id, n_results=3),
-            start_metadata={"query": query, "session_id": session.id},
-            trace_recorder=trace_recorder,
+        run_tool_with_debug(  # 19. 统一执行会话记忆召回 Tool
+            debug_emit,  # debug_emit = 调试事件回调
+            observations,  # observations = Tool 观察结果列表
+            "MemoryRecallTool",  # tool_name = 会话记忆召回 Tool
+            "开始召回会话记忆。",  # start_message = 调试面板展示文本
+            lambda: run_memory_recall(  # handler = 真正执行 session_memory_chunks 检索的函数
+                retrieval=runtime["retrieval"],  # retrieval = RetrievalService 实例
+                query=query,  # query = 本 Skill 的检索文本
+                session_id=session.id,  # session_id = 当前会话 ID，只召回本局游戏记忆
+                n_results=3,  # n_results = 召回记忆条数
+            ),
+            start_metadata={"query": query, "session_id": session.id},  # start_metadata = 记录检索文本和会话 ID
+            trace_recorder=trace_recorder,  # trace_recorder = 可选监控记录器
         )
 
     # ===== 6. 规则检定（仅当需要时） =====
+    # 20. RuleCheckTool 需要同时满足两个条件：当前行动确实需要检定，并且计划白名单允许它。
     if should_run_rule_check(spec.name, state) and "RuleCheckTool" in allowed_tools:
-        run_tool_with_debug(
-            debug_emit, observations, "RuleCheckTool", "开始执行规则检定。",
-            lambda: run_rule_check(
-                message=state.get("player_input", ""), intent=intent,
-                character_skills=character.skills, character_attributes=character.attributes,
-                scenario_context=state.get("scenario_context", []),
-                default_skill=str(intent.get("skill") or runtime.get("default_skill") or "侦查"),
-                current_san=character.san_current, luck=character.luck,
+        run_tool_with_debug(  # 21. 统一执行规则检定 Tool，并记录骰点结果
+            debug_emit,  # debug_emit = 调试事件回调
+            observations,  # observations = Tool 观察结果列表
+            "RuleCheckTool",  # tool_name = 规则检定 Tool
+            "开始执行规则检定。",  # start_message = 调试面板展示文本
+            lambda: run_rule_check(  # handler = 先裁定行动，再执行技能/理智检定
+                message=state.get("player_input", ""),  # message = 玩家原始行动文本
+                intent=intent,  # intent = 结构化意图，包含 action_type/target/skill 等
+                character_skills=character.skills,  # character_skills = 角色技能字典，如 {"侦查": 60}
+                character_attributes=character.attributes,  # character_attributes = 角色属性字典
+                scenario_context=state.get("scenario_context", []),  # scenario_context = 剧本上下文，辅助判断风险和难度
+                default_skill=str(intent.get("skill") or runtime.get("default_skill") or "侦查"),  # default_skill = 未明确技能时的默认检定技能
+                current_san=character.san_current,  # current_san = 当前理智值，用于理智检定后计算损失
+                luck=character.luck,  # luck = 幸运值，规则裁定可能会使用
             ),
-            start_metadata={"default_skill": str(intent.get("skill") or runtime.get("default_skill") or "侦查"), "current_san": character.san_current},
-            trace_recorder=trace_recorder,
+            start_metadata={  # start_metadata = 调试事件输入摘要
+                "default_skill": str(intent.get("skill") or runtime.get("default_skill") or "侦查"),  # default_skill = 本次预期检定技能
+                "current_san": character.san_current,  # current_san = 检定前理智值
+            },
+            trace_recorder=trace_recorder,  # trace_recorder = 可选监控记录器
         )
 
     # ===== 汇总结果 =====
-    return SkillResult(
-        skill=spec.name,
-        input={"player_input": state.get("player_input", ""), "intent": intent},
-        observations=observations,  # 所有 Tool 的观察结果
-        result={
-            "decision_summary": build_decision_summary(spec, observations),  # 决策摘要
-            "candidate_resolution": build_candidate_resolution(spec, observations),  # 候选裁定
-            "used_tools": [item.get("tool") for item in observations],  # 实际使用的 Tool 列表
+    # 22. 所有允许的 Tool 尝试执行完后，统一打包成 SkillResult 返回给 ExecutorAgent。
+    return SkillResult(  # SkillResult = Skill 的标准输出结构
+        skill=spec.name,  # skill = 当前 Skill 名称，如 InvestigateSkill / MoveSkill
+        input={"player_input": state.get("player_input", ""), "intent": intent},  # input = 本 Skill 的关键输入摘要，便于日志和调试
+        observations=observations,  # observations = 所有 Tool 的观察结果列表
+        result={  # result = 给后续 Agent 使用的汇总信息
+            "decision_summary": build_decision_summary(spec, observations),  # decision_summary = 人类可读的一句话执行摘要
+            "candidate_resolution": build_candidate_resolution(spec, observations),  # candidate_resolution = 候选裁定，声明需要后续综合处理
+            "used_tools": [item.get("tool") for item in observations],  # used_tools = 本 Skill 实际调用过的 Tool 名称
         },
     )
 

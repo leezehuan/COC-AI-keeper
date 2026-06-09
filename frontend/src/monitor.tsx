@@ -8,6 +8,11 @@ const defaultRecordLimit = 120;
 const defaultRunLimit = 60;
 
 function MonitorApp() {
+  // 【Agent 监控页状态】
+  // runs：一次玩家行动/助手请求的列表。
+  // records：某些 run 下的步骤记录列表。
+  // selectedRunId：当前正在聚焦查看哪一次 run。
+  // selectedRecord：右侧详情栏正在展开哪一条输入输出 JSON。
   const [settings, setSettings] = useState<AgentTraceSettings | null>(null);
   const [runs, setRuns] = useState<AgentTraceRun[]>([]);
   const [records, setRecords] = useState<AgentTraceRecord[]>([]);
@@ -22,6 +27,8 @@ function MonitorApp() {
   const [error, setError] = useState('');
 
   useEffect(() => {
+    // 首次进入监控页时，先通过普通 REST 接口加载历史数据。
+    // 这保证即使你打开页面时没有实时事件，也能看到之前已经持久化的记录。
     void refreshAll();
   }, []);
 
@@ -31,6 +38,9 @@ function MonitorApp() {
   }, [settings?.max_records]);
 
   useEffect(() => {
+    // 监控页的实时部分使用 NDJSON 长连接。
+    // 后端每创建 run、写入 record、更新 settings，都会推一行 JSON。
+    // AbortController 用来在暂停实时或组件卸载时断开旧连接，避免重复订阅。
     let cancelled = false;
     const controller = new AbortController();
     if (!live) {
@@ -70,6 +80,8 @@ function MonitorApp() {
   const agentOptions = useMemo(() => Array.from(new Set(records.map((item) => item.agent_name))).sort(), [records]);
 
   async function refreshAll() {
+    // 历史查询：一次性拉取设置、run 列表、record 列表。
+    // 和实时流不同，这里适合刷新页面、切换筛选条件、删除后重新同步。
     setError('');
     try {
       const [nextSettings, nextRuns, nextRecords] = await Promise.all([
@@ -88,6 +100,10 @@ function MonitorApp() {
   }
 
   function handleMonitorEvent(event: AgentMonitorEvent) {
+    // 实时事件入口。
+    // event.type === "run" 时更新左侧 Runs；
+    // event.type === "record" 时更新中间 Records；
+    // event.type === "settings" 时更新顶部统计和存储上限。
     if (event.type === 'start') {
       setConnection('connected');
       setStatus('实时流已连接');

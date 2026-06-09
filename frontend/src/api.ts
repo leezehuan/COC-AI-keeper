@@ -20,6 +20,12 @@ import type {
 // 2. 这里统一拼接 /api 路径、设置 JSON 请求头、解析错误。
 // 3. 对流式接口，streamRequest 会一行一行读取后端返回的 NDJSON 事件。
 // =============================================================================
+// 【重要变量】apiBase
+// 这是前端访问后端 API 的统一根路径。
+// 之所以不用把 "/api" 写死在每个 fetch 调用里，是为了让项目在不同部署前缀下仍然可用：
+// - 本地开发可能是 http://localhost:5173/api
+// - 打包部署后可能带有子路径前缀
+// App.tsx、monitor.tsx 和其他前端模块都通过这里间接访问后端。
 const apiBase = `${import.meta.env.BASE_URL.replace(/\/$/, '')}/api`;
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -57,6 +63,16 @@ function parseErrorMessage(detail: string, status: number): string {
 }
 
 export const api = {
+  // 【重要变量】api
+  // 这是前端页面层真正直接依赖的 API 门面对象。
+  // App.tsx 不需要关心 URL、HTTP 方法、JSON 序列化、错误解析这些底层细节，
+  // 只需要调用语义化方法，例如：
+  // - api.characters()           -> 读取角色列表
+  // - api.createSession(id)      -> 创建会话
+  // - api.streamAction(...)      -> 发送玩家行动并流式接收回合结果
+  // - api.streamMonitorEvents()  -> 订阅监控面板事件
+  //
+  // 你可以把它理解成“浏览器访问后端时的服务目录”。
   // 页面层只调用这些语义化方法，不直接拼接后端路径。
   characters: () => request<Character[]>(`${apiBase}/characters`),
   sessions: () => request<GameSession[]>(`${apiBase}/sessions`),
@@ -108,6 +124,8 @@ export const api = {
 };
 
 export interface MonitorRunFilters {
+  // Monitor 页面查询“执行批次(run)”时使用的筛选条件。
+  // run 是一次完整的 Agent 执行链路，例如一次玩家行动触发的一整套 Supervisor -> Agents 流程。
   session_id?: string;
   source?: string;
   status?: string;
@@ -116,6 +134,8 @@ export interface MonitorRunFilters {
 }
 
 export interface MonitorRecordFilters {
+  // Monitor 页面查询“执行步骤(record)”时使用的筛选条件。
+  // record 比 run 更细，通常对应某个 Agent、Tool 或步骤的一条监控记录。
   run_id?: string;
   session_id?: string;
   agent_name?: string;
@@ -126,6 +146,14 @@ export interface MonitorRecordFilters {
 }
 
 export interface AssistantChatPayload {
+  // 【重要变量】AssistantChatPayload
+  // 这是前端调用“场外游戏助手”时发送给后端的请求体结构。
+  // 它不仅包含用户问题 message，还控制检索增强策略：
+  // - mode: 回答规则、当前局势，还是自动判断
+  // - enable_mqe / mqe_expansions: 是否做多查询扩展
+  // - enable_hyde: 是否启用 HyDE 假设文档检索
+  // - top_k / candidate_pool_multiplier: 控制召回规模
+  // 学这个接口很有价值，因为它是“前端如何驱动 RAG 策略”的一个小而完整的例子。
   session_id?: string | null;        // 当前会话 ID（可选，绑定会话时可检索会话记忆）
   message: string;                   // 玩家问题
   mode?: AssistantMode;              // 助手模式（auto/rules/session_help）
@@ -152,9 +180,9 @@ async function streamRequest<TEvent>(url: string, options: RequestInit, onEvent:
     throw new Error(parseErrorMessage(detail, response.status));
   }
   if (!response.body) throw new Error('浏览器不支持流式响应');
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
+  const reader = response.body.getReader(); // reader = 可逐块读取响应体的流式读取器
+  const decoder = new TextDecoder(); // decoder = 字节转字符串的解码器
+  let buffer = ''; // buffer = 暂存还没组成完整一行 JSON 的残片文本
   while (true) {
     // buffer 保存半行数据，避免网络分片导致 JSON 被截断后解析失败。
     const { value, done } = await reader.read();
@@ -173,10 +201,32 @@ async function streamRequest<TEvent>(url: string, options: RequestInit, onEvent:
 }
 
 async function streamGet<TEvent>(url: string, onEvent: (event: TEvent) => void, signal?: AbortSignal): Promise<void> {
+  /** GET 版流式请求包装。
+   *
+   * 【中文名称】流式 GET 请求
+   * 【功能说明】把 streamRequest 再包一层，专门给 SSE/监控流这类 GET 接口使用。
+   * 这样调用方只需要关心“我要订阅哪个 URL、收到事件后做什么”，不必重复传 method。
+   */
   return streamRequest<TEvent>(url, { method: 'GET', headers: {}, signal }, onEvent);
 }
 
 function queryString(filters: object): string {
+  /** 把筛选对象转成 URL 查询字符串。
+   *
+   * 【中文名称】构建查询字符串
+   *
+   * 【功能说明】
+   * Monitor 页面会把筛选条件放在一个对象里，例如：
+   * `{ session_id: 'abc', status: 'success', limit: 50 }`
+   * 本函数把它转成：
+   * `?session_id=abc&status=success&limit=50`
+   *
+   * 【实现方法】
+   * 1. 遍历对象键值对
+   * 2. 过滤 undefined / null / 空字符串
+   * 3. 使用 URLSearchParams 做安全编码
+   * 4. 最终返回空串或带 `?` 的查询文本
+   */
   const params = new URLSearchParams();
   Object.entries(filters as Record<string, unknown>).forEach(([key, value]) => {
     if (value === undefined || value === null || value === '') return;

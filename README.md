@@ -24,6 +24,7 @@
 
 - [docs/初学者学习指南](D:/Project/coc-lite/docs/初学者学习指南.md)：适合先建立全局认识
 - [docs/后端主线精读](D:/Project/coc-lite/docs/后端主线精读.md)：适合顺着“一次请求怎么跑完整条后端链路”来读
+- [docs/Agent监控系统学习指南](D:/Project/coc-lite/docs/Agent监控系统学习指南.md)：适合学习如何观察每个 Agent/Tool/LLM 步骤的输入输出
 - [docs/变量查询表](D:/Project/coc-lite/docs/变量查询表.md)：适合查变量和状态字段，不容易在代码里迷路
 - [docs/Tools扩展指南](D:/Project/coc-lite/docs/Tools扩展指南.md)：适合学习如何新增一个原子 Tool
 - [docs/Skills扩展指南](D:/Project/coc-lite/docs/Skills扩展指南.md)：适合学习如何新增一种复合行动 Skill
@@ -39,6 +40,7 @@
 - **数据库持久化**：PostgreSQL 保存角色、会话、线索、道具、flag 与回合日志。
 - **流式响应**：前端通过 NDJSON 流接收叙事、调试事件与助手回答。
 - **实时调试窗口**：前端展示 Agent 节点执行、Skill 状态与 Tool 调用日志。
+- **Agent 监控页**：独立 `5174` 端口监控台持久化保存每次 Agent/Skill/Tool/LLM 步骤的输入输出，支持实时查看、历史筛选、删除和全局条数上限。
 - **AI 场景图片**：关键场景自动触发图片生成，增强叙事沉浸感。
 - **防剧透与状态约束**：多层校验（确定性 guardrails + Reflection）降低玩家侧剧透风险。
 

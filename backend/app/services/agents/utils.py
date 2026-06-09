@@ -8,7 +8,29 @@ from app.services.skills import SKILL_SPECS, choose_skill_name
 
 
 def format_context(rows: list[dict[str, Any]]) -> str:
-    """格式化上下文（format_context = 格式化上下文）。将检索结果列表转为LLM可读的文本块。"""
+    """把检索结果列表整理成适合喂给 LLM 的上下文文本。
+
+    【中文名称】格式化上下文
+
+    【功能说明】
+    检索服务返回的是结构化数组，每一项通常包含：
+    - id
+    - document
+    - metadata
+    但 LLM 更擅长消费连续文本，而不是直接理解 Python 字典列表。
+    本函数会把这些检索结果转成“标题 + 正文”的多段文本，供 PlannerAgent、
+    NarratorAgent、GuardAgent 等后续节点拼到 prompt 里。
+
+    【实现方法】
+    1. 遍历每条检索结果。
+    2. 优先从 metadata.title / source_name 中取展示标题。
+    3. 取 document 的前 1200 字，避免 prompt 过长。
+    4. 用空行连接成一个长文本块。
+
+    【为什么这里只截断前 1200 字】
+    因为这层的目标不是保存全文，而是给 LLM 提供“足够理解当前问题的片段”。
+    截断能控制 token 成本，也避免单条文档把上下文窗口挤爆。
+    """
     parts = []
     for row in rows:
         metadata = row.get("metadata") or {}
@@ -64,7 +86,26 @@ def format_location_names(rows: list[dict[str, Any]]) -> str:
 
 
 def build_session_memory_chunk(session_id: str, turn_index: int, state: dict[str, Any]) -> DocumentChunk | None:
-    """构建会话记忆块（build_session_memory_chunk = 构建记忆块）。将回合数据打包为可存入ChromaDB的DocumentChunk。"""
+    """把一个回合整理成可写入向量库的会话记忆块。
+
+    【中文名称】构建会话记忆块
+
+    【功能说明】
+    这个函数负责把“玩家输入 + 守秘人回应 + 状态变化 + 裁定”压缩成一段适合 RAG 检索的文本，
+    并封装成 DocumentChunk。
+    之后 Supervisor 会把它写进 `session_memory_chunks` 集合，
+    未来回合就能通过语义检索回忆“这局之前发生过什么”。
+
+    【实现方法】
+    1. 从 state 中取出 narration 和 player_input。
+    2. 如果两者都为空，说明这回合没有足够记忆价值，直接返回 None。
+    3. 拼接成一段结构化文本，包含会话 ID、回合号、行动、回应、状态变化、裁定。
+    4. 构造 DocumentChunk，并附带 session_id、turn_index、visibility 等检索元数据。
+
+    【为什么它很重要】
+    PostgreSQL 负责保存“结构化真相”，而这个记忆块负责保存“便于语义回忆的文本”。
+    两者配合，系统才能在长跑团里既记得精确状态，也记得叙事脉络。
+    """
     narration = state.get("narration", "").strip()
     player_input = state.get("player_input", "").strip()
     if not narration and not player_input:
@@ -99,7 +140,26 @@ def build_session_memory_chunk(session_id: str, turn_index: int, state: dict[str
 
 
 def ensure_options(value: Any) -> list[str]:
-    """确保选项列表有效（ensure_options = 确保选项）。去重、限制5个、追加"自定义行动"。"""
+    """把 LLM 生成的候选选项规范化成前端可直接展示的按钮列表。
+
+    【中文名称】确保选项有效
+
+    【功能说明】
+    LLM 返回的 options 可能存在很多不稳定情况：
+    - 不是列表
+    - 元素是对象而不是字符串
+    - 重复
+    - 太多
+    - 忘了加“自定义行动”
+    本函数会统一把这些情况整理成稳定格式，保证前端始终能渲染出一组可点击的行动按钮。
+
+    【实现方法】
+    1. 非列表时直接回退到默认选项。
+    2. 遍历候选项，调用 normalize_option 提取文本。
+    3. 去重，并过滤空值和重复的“自定义行动”。
+    4. 最多保留前 5 个自动建议。
+    5. 最后强制追加“自定义行动”。
+    """
     if not isinstance(value, list):
         return default_options()
     options: list[str] = []
@@ -171,7 +231,25 @@ def available_tool_names() -> list[str]:
 
 
 def fallback_turn_plan(state: dict[str, Any]) -> dict[str, Any]:
-    """回退回合计划（fallback_turn_plan = 回退计划）。LLM生成计划失败时使用的默认计划。"""
+    """生成一份不依赖 LLM 的兜底回合计划。
+
+    【中文名称】回退回合计划
+
+    【功能说明】
+    PlannerAgent 正常会让 LLM 生成 turn_plan，但工程上不能把主流程完全押在模型稳定性上。
+    当 LLM 调用失败、超时、返回坏 JSON，或者某些字段缺失时，
+    这里会给出一份“虽然不聪明，但一定能跑”的默认计划。
+
+    【实现方法】
+    1. 优先使用已有 intent；没有就重新做 heuristic_intent。
+    2. 根据 action_type 选择对应 Skill。
+    3. 读取该 Skill 允许的 Tool 列表。
+    4. 拼出一个字段齐全的 turn_plan 字典，供 normalize_turn_plan 和 ExecutorAgent 继续使用。
+
+    【为什么这个函数很关键】
+    它是多 Agent 流程抗故障能力的基础。
+    有了它，即便 PlannerAgent 的 LLM 输出不稳定，整局游戏也不会立刻卡死。
+    """
     intent = state.get("intent") or heuristic_intent(state.get("player_input", ""))
     action_type = str(intent.get("action_type") or infer_action_type(state.get("player_input", "")))
     skill_name = choose_skill_name(action_type)
@@ -244,7 +322,26 @@ def clamp_int(value: int, minimum: int, maximum: int) -> int:
 
 
 def apply_rule_observation_to_state(state: dict[str, Any], observations: list[dict[str, Any]]) -> None:
-    """应用规则观察结果到状态（apply_rule_observation_to_state = 应用规则结果）。从Tool观察中提取RuleCheckTool的裁定和检定数据。"""
+    """把 RuleCheckTool 的观察结果回填到执行态字典中。
+
+    【中文名称】应用规则观察结果到状态
+
+    【功能说明】
+    Skill 运行结束后，ExecutorAgent 拿到的是一串 ToolObservation 列表。
+    其中只有 RuleCheckTool 的 observation 真正携带了裁定、骰点、技能检定和理智检定结果。
+    本函数负责把这些信息从 observation 里“拆出来”，统一写回执行态 state，
+    这样后面的 ExecutorAgent、NarratorAgent 就不用自己反复遍历解析。
+
+    【实现方法】
+    1. 遍历 observations。
+    2. 只处理 tool == "RuleCheckTool" 的记录。
+    3. 从其 output 中提取 adjudication / dice_results / skill_checks / sanity_checks。
+    4. 原地写回传入的 state 字典。
+
+    【关键调用场景】
+    ExecutorAgent 在 Skill 执行之后，先调这个函数；
+    如果发现 state 里已经有 adjudication 和 skill_checks，就知道不必再次独立触发规则检定。
+    """
     for observation in observations:
         if observation.get("tool") != "RuleCheckTool":
             continue
